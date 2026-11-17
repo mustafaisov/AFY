@@ -4,6 +4,7 @@ Aile bütçesi, gelir/gider, varlıklar, borç taksitleri, BES, birikimli hayat 
 
 - Sunucu yok: program GitHub Pages'ten yüklenir, **tüm veriler kullanıcının kendi bilgisayarında** (tarayıcı + isteğe bağlı JSON dosyası) saklanır.
 - İnternet sadece döviz/altın kurlarını almak için kullanılır.
+- İsteğe bağlı kilit: parola (PBKDF2) ve parmak izi / Windows Hello (WebAuthn PRF); kilit açıkken veriler, yedekler ve bağlı kayıt dosyası AES-256-GCM ile şifrelenir.
 - Chrome/Edge'de "Uygulamayı yükle" ile masaüstü uygulaması gibi kurulur, internetsiz de çalışır.
 
 ## Dosyalar

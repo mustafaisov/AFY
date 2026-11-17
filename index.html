@@ -59,6 +59,10 @@ button.link.del:hover{color:var(--red)}
 #overlay textarea{flex:1;min-height:50vh;font-family:ui-monospace,Consolas,monospace;font-size:13px}
 .srch{border:1px solid var(--line);border-radius:8px;margin-top:8px;max-height:240px;overflow:auto}
 .srch div{padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--line);font-size:14px}.srch div:hover{background:var(--accent2)}
+#lock{position:fixed;inset:0;background:#17322b;display:flex;align-items:center;justify-content:center;z-index:100;padding:16px}
+.lockbox{background:#fff;border-radius:16px;padding:28px 24px;width:100%;max-width:360px;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.3)}
+.lockbox input{width:100%;font-size:17px;padding:11px;text-align:center}
+.lockbox .btn{width:100%;margin-top:10px;padding:11px;font-size:16px}
 ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 .scroll{overflow-x:auto}
 @media (max-width:760px){.app{flex-direction:column}nav{width:auto;display:flex;flex-wrap:wrap;gap:4px}nav h1{width:100%;margin-bottom:6px}nav button{width:auto}#status{display:none}main{padding:14px}}
@@ -78,6 +82,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
   <button data-tab="hedef" onclick="show('hedef')">🏁 Hedefler</button>
   <button data-tab="emekli" onclick="show('emekli')">🌴 Emeklilik</button>
   <button data-tab="ayar" onclick="show('ayar')">⚙️ Ayarlar & Yedek</button>
+  <button id="lockBtn" onclick="lockNow()" style="display:none;margin-top:14px">🔒 Kilitle</button>
   <div id="status"></div>
 </nav>
 <main id="main"></main>
@@ -87,7 +92,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 'use strict';
 // ---------- Yardımcılar ----------
 const KEY = 'aileFinans_v1';
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 const AYLAR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
 const CURS = [['TRY','TL'],['EUR','Euro'],['USD','Dolar']];
 const CURS_A = [...CURS, ['GAU','Gram altın']];
@@ -143,25 +148,204 @@ function merge(d,s){
 }
 function validData(d){ return d && typeof d==='object' && Array.isArray(d.transactions) && d.settings && typeof d.settings==='object'; }
 
-let S = null;
-try { const raw=localStorage.getItem(KEY); if(raw){ const d=JSON.parse(raw); if(validData(d)) S=merge(defaults(),d); } } catch(e){ console.error(e); }
-if(!S) S = defaults();
+// ---------- Şifreleme (parola + parmak izi) ----------
+// Veriler AES-256-GCM ile şifrelenir. Veri anahtarı (DK) parolayla (PBKDF2) ve isteğe bağlı olarak
+// parmak izi / Windows Hello (WebAuthn PRF) ile ayrı ayrı sarılır; parola bilinmeden veri okunamaz.
+const TE=new TextEncoder(), TD=new TextDecoder();
+function b64e(buf){ const u=new Uint8Array(buf); let s=''; for(let i=0;i<u.length;i+=0x8000) s+=String.fromCharCode.apply(null,u.subarray(i,i+0x8000)); return btoa(s); }
+function b64d(str){ const s=atob(str), u=new Uint8Array(s.length); for(let i=0;i<s.length;i++) u[i]=s.charCodeAt(i); return u; }
+function rnd(n){ return crypto.getRandomValues(new Uint8Array(n)); }
+async function pwKey(pw,salt){
+  const base=await crypto.subtle.importKey('raw',TE.encode(pw),'PBKDF2',false,['deriveKey']);
+  return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:310000,hash:'SHA-256'},base,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);
+}
+async function aesEnc(key,data){ const iv=rnd(12); const ct=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,data); return {iv:b64e(iv),ct:b64e(ct)}; }
+async function aesDec(key,o){ return crypto.subtle.decrypt({name:'AES-GCM',iv:b64d(o.iv)},key,b64d(o.ct)); }
+function importAes(raw){ return crypto.subtle.importKey('raw',raw,{name:'AES-GCM'},false,['encrypt','decrypt']); }
 
-let fileHandle = null, writeChain = Promise.resolve(), lastSave = null, fileError = '';
+let S=null, LOCK=null, encStored=null, DK=null, DKraw=null;
+try { const raw=localStorage.getItem(KEY); if(raw){ const d=JSON.parse(raw);
+  if(d && d.enc){ encStored=d; LOCK=d.lock; } else if(validData(d)) S=merge(defaults(),d); } } catch(e){ console.error(e); }
+if(!S && !encStored) S = defaults();
+
+let fileHandle = null, writeChain = Promise.resolve(), storeChain = Promise.resolve(), lastSave = null, fileError = '';
 function save(){
-  try { localStorage.setItem(KEY, JSON.stringify(S)); lastSave=new Date(); }
-  catch(e){ alert('Veriler tarayıcıya kaydedilemedi: '+e.message+'\nLütfen Ayarlar sekmesinden yedek alın.'); }
-  if(fileHandle){ writeChain = writeChain.then(writeFile); }
+  if(!S || (LOCK && !DK)) return;           // kilitliyken asla şifresiz yazma
+  const json=JSON.stringify(S), key=LOCK?DK:null, lock=LOCK?JSON.parse(JSON.stringify(LOCK)):null;
+  storeChain = storeChain.then(()=>writeStore(json,key,lock)).then(()=>{ lastSave=new Date(); updateStatus(); })
+    .catch(e=>alert('Veriler tarayıcıya kaydedilemedi: '+e.message+'\nLütfen Ayarlar sekmesinden yedek alın.'));
+  if(fileHandle){ writeChain = writeChain.then(()=>writeFile(json,key,lock)); }
   updateStatus();
 }
-async function writeFile(){
+async function writeStore(json,key,lock){
+  if(key){ const o=await aesEnc(key,TE.encode(json)); localStorage.setItem(KEY, JSON.stringify({enc:1, lock, iv:o.iv, ct:o.ct})); }
+  else localStorage.setItem(KEY, json);
+}
+// Yedek/dosya içeriği: kilit açıksa parolayla açılabilen şifreli paket
+async function makeExport(json,key,lock){
+  if(!(key && lock)) return JSON.stringify(JSON.parse(json),null,2);
+  const o=await aesEnc(key,TE.encode(json));
+  return JSON.stringify({aileFinansEncrypted:1, v:1, pw:lock.pw, data:o});
+}
+async function writeFile(json,key,lock){
   try {
+    const text=await makeExport(json,key,lock);
     const w = await fileHandle.createWritable();
-    await w.write(JSON.stringify(S,null,2));
+    await w.write(text);
     await w.close();
     fileError='';
   } catch(e){ console.error(e); fileError='Dosyaya yazılamadı ('+e.message+')'; }
   updateStatus();
+}
+function askPassword(title){
+  return new Promise(res=>{
+    const o=document.createElement('div'); o.id='overlay'; o.style.zIndex=110;
+    o.innerHTML=`<div class="card" style="max-width:380px"><h3>${esc(title)}</h3><form><input type="password" name="pw" style="width:100%;font-size:16px;padding:9px" autocomplete="current-password">
+      <div class="row" style="margin-top:12px"><button class="btn">Tamam</button><button type="button" class="btn sec">Vazgeç</button></div></form></div>`;
+    document.body.appendChild(o); const f=o.querySelector('form'); f.pw.focus();
+    f.onsubmit=e=>{ e.preventDefault(); o.remove(); res(f.pw.value); };
+    f.querySelector('.sec').onclick=()=>{ o.remove(); res(null); };
+  });
+}
+async function readExport(text){
+  let d=JSON.parse(text);
+  if(d && d.aileFinansEncrypted){
+    const pw=await askPassword('Bu yedek şifreli. Yedeği alırken kullandığın parolayı gir:');
+    if(pw==null) throw new Error('İptal edildi.');
+    let raw; try { raw=await aesDec(await pwKey(pw,b64d(d.pw.salt)),d.pw); } catch(e){ throw new Error('Parola yanlış.'); }
+    d=JSON.parse(TD.decode(await aesDec(await importAes(new Uint8Array(raw)),d.data)));
+  }
+  if(!validData(d)) throw new Error('Bu dosya Aile Finans verisi değil.');
+  return d;
+}
+
+// ---- Kilit ekranı
+const BIO_OK = !!(window.PublicKeyCredential && window.isSecureContext && location.protocol!=='file:');
+function showLock(msg){
+  document.querySelector('.app').style.display='none';
+  const ov=document.getElementById('overlay'); if(ov) ov.remove();
+  let o=document.getElementById('lock'); if(!o){ o=document.createElement('div'); o.id='lock'; document.body.appendChild(o); }
+  const bio = BIO_OK && LOCK && LOCK.bio;
+  o.innerHTML=`<div class="lockbox"><div style="font-size:44px">🏠🔒</div><h2 style="margin:6px 0 4px">Aile Finans</h2>
+    <p class="note" style="margin-bottom:16px">Verilerin şifreli. Devam etmek için kilidi aç.</p>
+    ${bio?`<button class="btn" onclick="unlockBio()">👆 Parmak izi / Windows Hello ile aç</button><p class="note" style="margin:14px 0 4px">ya da</p>`:''}
+    <form onsubmit="unlockPw(event)"><input type="password" name="pw" placeholder="Parola" autocomplete="current-password">
+    <button class="btn ${bio?'sec':''}">Parola ile aç</button></form>
+    <p id="lockMsg" class="neg" style="min-height:22px;margin:12px 0 0">${esc(msg||'')}</p></div>`;
+  if(!bio) setTimeout(()=>{ const i=o.querySelector('input'); if(i) i.focus(); },50);
+}
+function lockMsg(t,ok){ const m=document.getElementById('lockMsg'); if(m){ m.textContent=t; m.className=ok?'note':'neg'; } }
+async function unlockPw(ev){
+  ev.preventDefault(); const pw=ev.target.pw.value; if(!pw) return;
+  lockMsg('⏳ Açılıyor…',true);
+  let raw; try { raw=await aesDec(await pwKey(pw,b64d(LOCK.pw.salt)),LOCK.pw); }
+  catch(e){ ev.target.pw.value=''; lockMsg('Parola yanlış. Tekrar dene.'); return; }
+  finishUnlock(raw);
+}
+async function bioSecret(id,salt){
+  const a=await navigator.credentials.get({publicKey:{challenge:rnd(32), allowCredentials:[{type:'public-key',id}], userVerification:'required', timeout:60000,
+    extensions:{prf:{eval:{first:salt}}}}});
+  const r=a.getClientExtensionResults();
+  if(!r.prf || !r.prf.results || !r.prf.results.first) throw new Error('Bu cihaz parmak iziyle şifre çözmeyi desteklemiyor.');
+  return r.prf.results.first;
+}
+async function unlockBio(){
+  lockMsg('👆 Parmak izini okut…',true);
+  try {
+    const sec=await bioSecret(b64d(LOCK.bio.id), b64d(LOCK.bio.salt));
+    const raw=await aesDec(await importAes(sec), LOCK.bio);
+    finishUnlock(raw);
+  } catch(e){ lockMsg('Parmak iziyle açılamadı. Parolanı kullan.'); const i=document.querySelector('#lock input'); if(i) i.focus(); }
+}
+async function finishUnlock(raw){
+  DKraw=new Uint8Array(raw); DK=await importAes(DKraw);
+  if(encStored){
+    try { S=merge(defaults(), JSON.parse(TD.decode(await aesDec(DK,encStored)))); }
+    catch(e){ DK=null; DKraw=null; lockMsg('Veriler çözülemedi: dosya bozulmuş olabilir. Yedekten yüklemeyi dene.'); return; }
+    encStored=null;
+  }
+  if(!S) S=defaults();
+  const o=document.getElementById('lock'); if(o) o.remove();
+  document.querySelector('.app').style.display='';
+  lastAct=Date.now(); boot();
+}
+async function lockNow(){
+  if(!LOCK) return;
+  await storeChain; await writeChain;
+  S=null; DK=null; DKraw=null; editId=editAsset=editBes=editPol=editStock=null;
+  try { const d=JSON.parse(localStorage.getItem(KEY)); if(d && d.enc){ encStored=d; LOCK=d.lock; } } catch(e){}
+  document.getElementById('main').innerHTML='';
+  showLock();
+}
+let lastAct=Date.now();
+['mousemove','mousedown','keydown','touchstart','scroll','wheel'].forEach(ev=>window.addEventListener(ev,()=>{ lastAct=Date.now(); },{passive:true}));
+setInterval(()=>{ if(LOCK && DK && num(LOCK.autoMin)>0 && Date.now()-lastAct>num(LOCK.autoMin)*60000) lockNow(); },15000);
+
+// ---- Kilit ayarları
+async function enableLock(ev){
+  ev.preventDefault(); const f=ev.target, p1=f.p1.value, p2=f.p2.value;
+  if(p1.length<6){ alert('Parola en az 6 karakter olmalı.'); return; }
+  if(p1!==p2){ alert('Parolalar aynı değil.'); return; }
+  if(!confirm('ÖNEMLİ: Parolanı unutursan verilerini kimse (biz dahil) açamaz.\nParolayı güvenli bir yere yazdığından emin ol.\n\nKilidi açalım mı?')) return;
+  const raw=rnd(32), salt=rnd(16), w=await aesEnc(await pwKey(p1,salt), raw);
+  LOCK={v:1, pw:{salt:b64e(salt), iv:w.iv, ct:w.ct}, autoMin:10};
+  DKraw=raw; DK=await importAes(raw);
+  save(); await storeChain; render();
+  alert('🔒 Kilit açıldı ve verilerin şifrelendi.'+(BIO_OK?'\nİstersen şimdi parmak izi / Windows Hello da ekleyebilirsin.':''));
+}
+async function changePw(ev){
+  ev.preventDefault(); const f=ev.target;
+  try { await aesDec(await pwKey(f.old.value,b64d(LOCK.pw.salt)),LOCK.pw); } catch(e){ alert('Mevcut parola yanlış.'); return; }
+  if(f.p1.value.length<6){ alert('Yeni parola en az 6 karakter olmalı.'); return; }
+  if(f.p1.value!==f.p2.value){ alert('Yeni parolalar aynı değil.'); return; }
+  const salt=rnd(16), w=await aesEnc(await pwKey(f.p1.value,salt), DKraw);
+  LOCK.pw={salt:b64e(salt), iv:w.iv, ct:w.ct}; save(); await storeChain; render();
+  alert('Parola değiştirildi. Not: Daha önce aldığın şifreli yedekler eski parolayla açılır.');
+}
+async function disableLock(){
+  const pw=await askPassword('Kilidi kapatmak için parolanı gir:'); if(pw==null) return;
+  try { await aesDec(await pwKey(pw,b64d(LOCK.pw.salt)),LOCK.pw); } catch(e){ alert('Parola yanlış.'); return; }
+  if(!confirm('Kilit kapatılırsa veriler şifresiz saklanır ve program parola sormaz. Emin misin?')) return;
+  LOCK=null; DK=null; DKraw=null; save(); await storeChain; render();
+}
+async function enrollBio(){
+  try {
+    if(!(await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable())){ alert('Bu bilgisayarda parmak izi / Windows Hello / Touch ID kurulu görünmüyor. Önce işletim sisteminin ayarlarından kur.'); return; }
+    const salt=rnd(32);
+    const cred=await navigator.credentials.create({publicKey:{
+      rp:{name:'Aile Finans'}, user:{id:rnd(16), name:'aile-finans', displayName:'Aile Finans'}, challenge:rnd(32),
+      pubKeyCredParams:[{type:'public-key',alg:-7},{type:'public-key',alg:-257}],
+      authenticatorSelection:{authenticatorAttachment:'platform', userVerification:'required', residentKey:'preferred'},
+      timeout:60000, extensions:{prf:{eval:{first:salt}}}}});
+    const ext=cred.getClientExtensionResults();
+    if(!ext.prf || ext.prf.enabled===false){ alert('Bu bilgisayar/tarayıcı, parmak iziyle veri şifrelemeyi (WebAuthn PRF) desteklemiyor. Parola ile devam edebilirsin; Chrome\'u güncellemek işe yarayabilir.'); return; }
+    let sec=ext.prf.results && ext.prf.results.first;
+    if(!sec){ alert('Kurulumu tamamlamak için parmak izini bir kez daha okutman istenecek.'); sec=await bioSecret(cred.rawId,salt); }
+    const w=await aesEnc(await importAes(sec), DKraw);
+    LOCK.bio={id:b64e(cred.rawId), salt:b64e(salt), iv:w.iv, ct:w.ct};
+    save(); await storeChain; render(); alert('👆 Parmak izi eklendi. Bundan sonra programı parmak izinle açabilirsin.');
+  } catch(e){ if(e.name!=='NotAllowedError') alert('Parmak izi eklenemedi: '+e.message); }
+}
+function removeBio(){ if(!confirm('Parmak iziyle açma kaldırılsın mı? (Parola ile açmaya devam edersin.)')) return; delete LOCK.bio; save(); render(); }
+function setAutoLock(v){ LOCK.autoMin=num(v); save(); }
+function securityCard(){
+  if(!LOCK) return `<div class="card"><h3>🔒 Güvenlik: parola ve parmak izi</h3>
+    <div class="warn" style="margin-bottom:10px">Şu an kilit kapalı: programı açan herkes verilerini görebilir.</div>
+    <p>Kilidi açınca program her açılışta parola (ya da parmak izi) sorar ve <b>tüm verilerin bu bilgisayarda şifreli</b> saklanır. Yedekler ve bağlı kayıt dosyası da aynı parolayla şifrelenir.</p>
+    <form class="row" onsubmit="enableLock(event)"><label>Parola (en az 6 karakter)<input type="password" name="p1" autocomplete="new-password"></label>
+    <label>Parola tekrar<input type="password" name="p2" autocomplete="new-password"></label><button class="btn">🔒 Kilidi aç</button></form>
+    <p class="note">⚠️ Parolayı unutursan veriler kurtarılamaz. Bir kâğıda yazıp güvenli bir yerde sakla.</p></div>`;
+  return `<div class="card"><h3>🔒 Güvenlik: parola ve parmak izi</h3>
+    <div class="ok" style="margin-bottom:12px">✅ Kilit açık: veriler şifreli, her açılışta parola${LOCK.bio?' ya da parmak izi':''} soruluyor.</div>
+    <table>
+      <tr><td>Parmak izi / Windows Hello</td><td class="num">${!BIO_OK?'<span class="note">Sadece internet adresinden kurulan sürümde kullanılabilir</span>':LOCK.bio?'<span class="pos">Ekli ✔</span> <button class="link del" onclick="removeBio()">kaldır</button>':'<button class="btn sec" onclick="enrollBio()">👆 Parmak izi ekle</button>'}</td></tr>
+      <tr><td>Hareketsiz kalınca otomatik kilitle</td><td class="num"><select onchange="setAutoLock(this.value)">${optsKV([['1','1 dakika'],['5','5 dakika'],['10','10 dakika'],['30','30 dakika'],['0','Hiçbir zaman']],String(num(LOCK.autoMin)))}</select></td></tr>
+    </table>
+    <h3 style="margin-top:16px">Parolayı değiştir</h3>
+    <form class="row" onsubmit="changePw(event)"><label>Mevcut parola<input type="password" name="old" autocomplete="current-password"></label>
+      <label>Yeni parola<input type="password" name="p1" autocomplete="new-password"></label><label>Yeni parola tekrar<input type="password" name="p2" autocomplete="new-password"></label>
+      <button class="btn sec">Değiştir</button></form>
+    <div class="row" style="margin-top:14px"><button class="btn sec" onclick="lockNow()">🔒 Şimdi kilitle</button><button class="btn danger" onclick="disableLock()">Kilidi kapat</button></div></div>`;
 }
 function updateStatus(){
   const el=document.getElementById('status'); if(!el) return;
@@ -340,6 +524,8 @@ let tab='ozet', filterMonth=ym(today()), editId=null, editAsset=null, editBes=nu
 const VIEWS = {ozet:vOzet, islem:vIslem, butce:vButce, varlik:vVarlik, hisse:vHisse, bes:vBes, sigorta:vSigorta, hedef:vHedef, emekli:vEmekli, ayar:vAyar};
 function show(t){ tab=t; editId=null; editAsset=null; editBes=null; editPol=null; editStock=null; render(); window.scrollTo(0,0); }
 function render(){
+  if(!S) return;
+  const lb=document.getElementById('lockBtn'); if(lb) lb.style.display=LOCK?'':'none';
   document.querySelectorAll('nav button[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
   document.getElementById('main').innerHTML = VIEWS[tab]();
   updateStatus();
@@ -1056,7 +1242,7 @@ function lineChart(pts,retAge){
 const FS = 'showSaveFilePicker' in window;
 function vAyar(){
   const st=S.settings;
-  let h=`<h2>Ayarlar & Yedek</h2><div class="card"><h3>💾 Verilerin nerede?</h3>
+  let h=`<h2>Ayarlar & Yedek</h2>`+securityCard()+`<div class="card"><h3>💾 Verilerin nerede?</h3>
     <p>Verilerin otomatik olarak bu bilgisayardaki tarayıcının içinde saklanır; internete gönderilmez. Tarayıcı geçmişi/verileri temizlenirse silinebilir, bu yüzden aşağıdakilerden birini yap:</p>`;
   if(FS) h+=`<p><b>Önerilen:</b> Verileri bilgisayarında bir dosyaya bağla. Programı her açtığında "Kayıt dosyasını aç" de; sonra her değişiklik o dosyaya da otomatik yazılır.</p>
     <div class="row"><button class="btn" onclick="linkFile()">📄 Yeni kayıt dosyası oluştur</button><button class="btn sec" onclick="openFile()">📂 Kayıt dosyasını aç</button></div>
@@ -1114,12 +1300,15 @@ function download(name,text,type){
   a.href=URL.createObjectURL(b); a.download=name; document.body.appendChild(a); a.click();
   setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },1000);
 }
-function backup(){ S.settings.lastBackup=today(); save(); download('aile-finans-yedek-'+today()+'.json', JSON.stringify(S,null,2), 'application/json'); render(); }
+async function backup(){
+  S.settings.lastBackup=today(); save();
+  const text=await makeExport(JSON.stringify(S), LOCK?DK:null, LOCK);
+  download('aile-finans-yedek-'+today()+(LOCK?'-sifreli':'')+'.json', text, 'application/json'); render();
+}
 function loadData(d){ S=merge(defaults(),d); editId=null; editAsset=null; editBes=null; editPol=null; processRecurring(); }
 function restore(inp){
   const f=inp.files[0]; inp.value=''; if(!f) return;
-  f.text().then(t=>{
-    const d=JSON.parse(t); if(!validData(d)) throw new Error('Bu dosya Aile Finans yedeği değil.');
+  f.text().then(readExport).then(d=>{
     if(!confirm('Yedekteki veriler yüklenecek ve şu anki verilerin YERİNİ alacak. Devam edilsin mi?')) return;
     loadData(d); save(); render(); alert('Yedek yüklendi.');
   }).catch(e=>alert('Yüklenemedi: '+e.message));
@@ -1135,13 +1324,13 @@ async function linkFile(){
 async function openFile(){
   try {
     const [h] = await window.showOpenFilePicker({types:FTYPES});
-    const d = JSON.parse(await (await h.getFile()).text());
-    if(!validData(d)) throw new Error('Bu dosya Aile Finans verisi değil.');
     if(h.requestPermission){ const p=await h.requestPermission({mode:'readwrite'}); if(p!=='granted') throw new Error('Dosyaya yazma izni verilmedi.'); }
+    const d = await readExport(await (await h.getFile()).text());
     loadData(d); fileHandle=h; S.settings.lastBackup=today(); save(); render();
   } catch(e){ if(e.name!=='AbortError') alert('Açılamadı: '+e.message); }
 }
 function exportCSV(){
+  if(LOCK && !confirm('Excel (CSV) dosyası ŞİFRESİZDİR; açan herkes işlemlerini görebilir. Devam edilsin mi?')) return;
   const rows=[['Tarih','Tür','Kategori','Tutar','Para birimi','TL karşılığı','Kişi','Not']];
   S.transactions.slice().sort((a,b)=>a.date.localeCompare(b.date)).forEach(t=>rows.push([fmtDate(t.date), t.type==='gelir'?'Gelir':'Gider', t.category,
     String(t.amount).replace('.',','), t.currency, toTRY(t.amount,t.currency).toFixed(2).replace('.',','), t.member, t.note]));
@@ -1151,13 +1340,19 @@ function exportCSV(){
 function resetAll(){
   if(!confirm('TÜM veriler silinecek. Emin misin?')) return;
   if(!confirm('Son kez soruyorum: geri alınamaz. Silinsin mi?')) return;
-  S=defaults(); save(); show('ozet');
+  S=defaults(); save(); show('ozet');  // kilit (varsa) açık kalır
 }
 
 // ---------- Başlat ----------
 window.addEventListener('beforeunload',e=>{ if(fileHandle && fileError){ e.preventDefault(); e.returnValue=''; } });
-processRecurring();
-render();
+let booted=false;
+function boot(){
+  processRecurring(); render();
+  if(booted) return; booted=true;
+  if(S.settings.autoRates && S.settings.ratesDate!==today()) fetchRates(false);
+  if(S.settings.avKey && S.stocks.some(x=>x.priceDate!==today())) setTimeout(()=>fetchPrices(false),1500);
+}
+if(encStored) showLock(); else boot();
 // ---------- Kurulum ve güncelleme (PWA) ----------
 function showUpdateBar(){
   let b=document.getElementById('updBar');
@@ -1186,8 +1381,6 @@ if('serviceWorker' in navigator && (location.protocol==='https:' || location.hos
 window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); installEvt=e; if(tab==='ayar') render(); });
 async function installApp(){ if(!installEvt) return; installEvt.prompt(); await installEvt.userChoice; installEvt=null; render(); }
 if(navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
-if(S.settings.autoRates && S.settings.ratesDate!==today()) fetchRates(false);
-if(S.settings.avKey && S.stocks.some(x=>x.priceDate!==today())) setTimeout(()=>fetchPrices(false),1500);
 </script>
 </body>
 </html>
