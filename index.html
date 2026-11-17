@@ -52,6 +52,13 @@ button.link.del:hover{color:var(--red)}
 .warn{background:#fff6e5;border:1px solid #f3dcaa;color:#7a5200;padding:10px 12px;border-radius:8px;font-size:14px;margin-bottom:16px}
 .warn a{color:#7a5200;font-weight:600}
 .ok{background:#e9f6ee;border:1px solid #bfe3cc;color:#1e5e37;padding:10px 12px;border-radius:8px;font-size:14px}
+.alert{padding:8px 10px;border-radius:8px;margin:6px 0;font-size:14px}
+.alert.red{background:#fbeaea;color:#8e2a1f}.alert.amber{background:#fff6e5;color:#7a5200}.alert.info{background:#eef3fb;color:#24456e}.alert.green{background:#e9f6ee;color:#1e5e37}
+#overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:60;padding:16px}
+#overlay .card{max-width:820px;width:100%;max-height:90vh;display:flex;flex-direction:column}
+#overlay textarea{flex:1;min-height:50vh;font-family:ui-monospace,Consolas,monospace;font-size:13px}
+.srch{border:1px solid var(--line);border-radius:8px;margin-top:8px;max-height:240px;overflow:auto}
+.srch div{padding:7px 10px;cursor:pointer;border-bottom:1px solid var(--line);font-size:14px}.srch div:hover{background:var(--accent2)}
 ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 .scroll{overflow-x:auto}
 @media (max-width:760px){.app{flex-direction:column}nav{width:auto;display:flex;flex-wrap:wrap;gap:4px}nav h1{width:100%;margin-bottom:6px}nav button{width:auto}#status{display:none}main{padding:14px}}
@@ -65,6 +72,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
   <button data-tab="islem" onclick="show('islem')">💸 Gelir / Gider</button>
   <button data-tab="butce" onclick="show('butce')">🎯 Bütçe</button>
   <button data-tab="varlik" onclick="show('varlik')">💰 Varlıklar</button>
+  <button data-tab="hisse" onclick="show('hisse')">📈 Hisseler</button>
   <button data-tab="bes" onclick="show('bes')">🏦 BES</button>
   <button data-tab="sigorta" onclick="show('sigorta')">🛡️ Hayat Sigortaları</button>
   <button data-tab="hedef" onclick="show('hedef')">🏁 Hedefler</button>
@@ -79,7 +87,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 'use strict';
 // ---------- Yardımcılar ----------
 const KEY = 'aileFinans_v1';
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const AYLAR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
 const CURS = [['TRY','TL'],['EUR','Euro'],['USD','Dolar']];
 const CURS_A = [...CURS, ['GAU','Gram altın']];
@@ -98,9 +106,11 @@ function esc(s){ return String(s ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':
 function fmtDate(d){ if(!d) return ''; const [y,m,dd]=d.split('-'); return dd+'.'+m+'.'+y; }
 function mLabel(m){ return AYLAR[+m.slice(5)-1]+' '+m.slice(2,4); }
 function num(v){ const n=parseFloat(v); return isNaN(n)?0:n; }
+const SYM={TRY:'₺',EUR:'€',USD:'$',GBP:'£',GBX:'p'};
+function money2(v,cur='TRY'){ return nf2.format(v)+' '+(SYM[cur]||cur); }
 function money(v,cur='TRY'){
   if(cur==='GAU') return nf2.format(v)+' gr';
-  const sym={TRY:'₺',EUR:'€',USD:'$'}[cur]||cur;
+  const sym=SYM[cur]||cur;
   return nf.format(Math.round(v))+' '+sym;
 }
 function short(v){ if(Math.abs(v)>=1e6) return nf2.format(v/1e6)+' M €'; if(Math.abs(v)>=1e3) return nf.format(v/1e3)+' B €'; return nf.format(v)+' €'; }
@@ -118,9 +128,9 @@ function defaults(){
       members:['Ben','Eşim'],
       expenseCats:['Market','Faturalar','Kira/Aidat','Ulaşım/Araç','Eğitim','Sağlık','Giyim','Yeme-İçme','Eğlence','Tatil','Kredi/Borç ödemesi','Diğer'],
       incomeCats:['Maaş','Ticari gelir','Kira geliri','Temettü','Faiz','Diğer'],
-      rates:{EUR:0,USD:0,GAU:0}, ratesDate:'', ratesSourceDate:'', autoRates:true, lastBackup:''
+      rates:{EUR:0,USD:0,GAU:0,GBP:0}, avKey:'', ratesDate:'', ratesSourceDate:'', autoRates:true, lastBackup:''
     },
-    transactions:[], budgets:{}, assets:[], goals:[], bes:[], policies:[],
+    transactions:[], budgets:{}, assets:[], goals:[], bes:[], policies:[], stocks:[],
     retirement:{age:48,retireAge:58,lifeTo:90,monthlyNeed:5000,current:0,monthly:0,realReturn:3.5,wr:3.5,lump:0}
   };
 }
@@ -168,9 +178,14 @@ function updateStatus(){
 // ---------- İnternetten kur güncelleme (sunucu gerekmez) ----------
 const RATE_URLS=['https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/eur.min.json',
                  'https://latest.currency-api.pages.dev/v1/currencies/eur.min.json'];
-const ECB_URL='https://api.frankfurter.dev/v1/latest?base=EUR&symbols=TRY,USD';
+const ECB_URL='https://api.frankfurter.dev/v1/latest?base=EUR&symbols=TRY,USD,GBP';
 const OZ=31.1034768;
 let ratesBusy=false, ratesMsg='';
+function formDirty(){
+  return [...document.querySelectorAll('main form input, main form select, main form textarea')].some(el=>
+    el.type==='checkbox' ? el.checked!==el.defaultChecked :
+    el.tagName==='SELECT' ? [...el.options].some(o=>o.selected!==o.defaultSelected) : el.value!==el.defaultValue);
+}
 async function getJSON(u){
   const c=new AbortController(), t=setTimeout(()=>c.abort(),10000);
   try { const r=await fetch(u,{signal:c.signal,cache:'no-store'}); if(!r.ok) throw new Error('HTTP '+r.status); return await r.json(); }
@@ -181,18 +196,18 @@ async function fetchRates(manual){
   let res=null, err='';
   for(const u of RATE_URLS){
     try { const d=await getJSON(u), e=d.eur;
-      if(e && e.try>1 && e.usd>0){ res={EUR:e.try, USD:e.try/e.usd, GAU:e.xau>0?e.try/e.xau/OZ:0, date:d.date}; break; }
+      if(e && e.try>1 && e.usd>0){ res={EUR:e.try, USD:e.try/e.usd, GBP:e.gbp>0?e.try/e.gbp:0, GAU:e.xau>0?e.try/e.xau/OZ:0, date:d.date}; break; }
     } catch(x){ err=x.name==='AbortError'?'zaman aşımı':x.message; }
   }
   if(!res){
     try { const d=await getJSON(ECB_URL);
-      if(d.rates && d.rates.TRY>1 && d.rates.USD>0) res={EUR:d.rates.TRY, USD:d.rates.TRY/d.rates.USD, GAU:0, date:d.date};
+      if(d.rates && d.rates.TRY>1 && d.rates.USD>0) res={EUR:d.rates.TRY, USD:d.rates.TRY/d.rates.USD, GBP:d.rates.GBP>0?d.rates.TRY/d.rates.GBP:0, GAU:0, date:d.date};
     } catch(x){ err=x.name==='AbortError'?'zaman aşımı':x.message; }
   }
   ratesBusy=false;
   if(res){
     const r=S.settings.rates;
-    r.EUR=+res.EUR.toFixed(4); r.USD=+res.USD.toFixed(4); if(res.GAU>0) r.GAU=+res.GAU.toFixed(2);
+    r.EUR=+res.EUR.toFixed(4); r.USD=+res.USD.toFixed(4); if(res.GBP>0) r.GBP=+res.GBP.toFixed(4); if(res.GAU>0) r.GAU=+res.GAU.toFixed(2);
     S.settings.ratesDate=today(); S.settings.ratesSourceDate=res.date||'';
     ratesMsg='🌐 Kurlar güncellendi'+(res.date?' ('+fmtDate(res.date)+')':'')+(res.GAU>0?'':' · altın alınamadı');
     save();
@@ -202,11 +217,11 @@ async function fetchRates(manual){
     if(manual) alert('Kurlar internetten alınamadı. İnternet bağlantını kontrol et ya da kurları elle gir.');
   }
   // Form doldururken yazdıklarını silmemek için sadece formsuz ekranları yenile
-  if(manual || (res && (tab==='ozet' || tab==='varlik' && !editAsset))) render();
+  if(manual || (res && !formDirty())) render();
 }
 
 // ---------- Hesaplar ----------
-function rate(cur){ return cur==='TRY' ? 1 : num(S.settings.rates[cur]); }
+function rate(cur){ return cur==='TRY' ? 1 : cur==='GBX' ? num(S.settings.rates.GBP)/100 : num(S.settings.rates[cur]); }
 function toTRY(amount,cur){ return num(amount)*rate(cur); }
 function monthTotals(m){
   let inc=0, exp=0; const byCat={};
@@ -236,7 +251,9 @@ function worth(){
   for(const b of S.bes){ const v=besVested(b); assets+=v; fin+=v; bes+=v; }
   let ins=0;
   for(const p of S.policies){ const v=toTRY(p.value,p.currency); assets+=v; fin+=v; ins+=v; }
-  return {assets,debt,net:assets-debt,fin,div,bes,ins};
+  let stk=0;
+  for(const x of S.stocks){ if(num(x.shares)>0){ const c=stockCalc(x); assets+=c.valTRY; fin+=c.valTRY; stk+=c.valTRY; div+=c.divTRY; } }
+  return {assets,debt,net:assets-debt,fin,div,bes,ins,stk};
 }
 // ---------- Otomatik aylık ödemeler (borç taksitleri, BES katkıları) ----------
 function addMonths(m,k){ let [y,mo]=m.split('-').map(Number); mo+=k; while(mo>12){mo-=12;y++;} while(mo<1){mo+=12;y--;} return y+'-'+pad2(mo); }
@@ -319,9 +336,9 @@ function cats(type){ return [...(type==='gelir'?S.settings.incomeCats:S.settings
 
 // ---------- Görünüm ----------
 let swReg=null, installEvt=null;
-let tab='ozet', filterMonth=ym(today()), editId=null, editAsset=null, editBes=null, editPol=null;
-const VIEWS = {ozet:vOzet, islem:vIslem, butce:vButce, varlik:vVarlik, bes:vBes, sigorta:vSigorta, hedef:vHedef, emekli:vEmekli, ayar:vAyar};
-function show(t){ tab=t; editId=null; editAsset=null; editBes=null; editPol=null; render(); window.scrollTo(0,0); }
+let tab='ozet', filterMonth=ym(today()), editId=null, editAsset=null, editBes=null, editPol=null, editStock=null;
+const VIEWS = {ozet:vOzet, islem:vIslem, butce:vButce, varlik:vVarlik, hisse:vHisse, bes:vBes, sigorta:vSigorta, hedef:vHedef, emekli:vEmekli, ayar:vAyar};
+function show(t){ tab=t; editId=null; editAsset=null; editBes=null; editPol=null; editStock=null; render(); window.scrollTo(0,0); }
 function render(){
   document.querySelectorAll('nav button[data-tab]').forEach(b=>b.classList.toggle('active',b.dataset.tab===tab));
   document.getElementById('main').innerHTML = VIEWS[tab]();
@@ -369,7 +386,7 @@ function budgetRows(m){
 }
 function vOzet(){
   const m=ym(today()), t=monthTotals(m), w=worth(), eur=rate('EUR'), net=t.inc-t.exp;
-  let h=`<h2>Özet — ${mLabel(m)}</h2>`+ratesWarn()+backupWarn();
+  let h=`<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:16px"><h2 style="margin:0">Özet — ${mLabel(m)}</h2><button class="btn" onclick="showReport()">🤖 Claude için rapor hazırla</button></div>`+ratesWarn()+backupWarn()+alertsCard();
   if(!S.transactions.length && !S.assets.length){
     h+=`<div class="card"><h3>👋 Hoş geldin! Başlamak için:</h3><ol>
       <li>Euro, dolar ve altın kurları internetten otomatik gelir. Kontrol etmek için <a href="#" onclick="show('varlik');return false">Varlıklar</a> sekmesine bak.</li>
@@ -384,6 +401,98 @@ function vOzet(){
   const cats=Object.entries(t.byCat).sort((a,b)=>b[1]-a[1]).slice(0,6);
   if(cats.length) h+=`<div class="card"><h3>Bu ay en çok harcanan</h3><table>${cats.map(([c,v])=>`<tr><td>${esc(c)}</td><td class="num">${money(v)}</td><td class="num note">%${nf.format(v/t.exp*100)}</td></tr>`).join('')}</table></div>`;
   return h;
+}
+
+// ---- Uyarılar ----
+function daysBetween(a,b){ return Math.round((new Date(b)-new Date(a))/86400000); }
+function upcomingPayments(nDays){
+  const t=today(), out=[];
+  const add=(name,lastPosted,f,day,amount,end)=>{ if(!lastPosted) return; const d=dueDate(addMonths(lastPosted,f),day); if(end && d>end) return;
+    const k=daysBetween(t,d); if(k>=0 && k<=nDays) out.push({name,date:d,days:k,amount}); };
+  S.assets.forEach(a=>{ if(isInstDebt(a) && num(a.left)>0) add(a.name+' taksiti',a.lastPosted,1,a.day,toTRY(a.inst,a.currency)); });
+  S.bes.forEach(b=>{ if(num(b.monthly)>0) add(b.name+' BES katkısı',b.lastPosted,1,b.day,num(b.monthly)); });
+  S.policies.forEach(p=>{ if(num(p.premium)>0) add(p.name+' sigorta primi',p.lastPosted,num(p.freq)||1,p.day,toTRY(p.premium,p.currency),p.end); });
+  return out.sort((x,y)=>x.days-y.days);
+}
+function computeAlerts(){
+  const out=[], t=today(), m=ym(t), tt=monthTotals(m), day=+t.slice(8), dim=new Date(+t.slice(0,4),+t.slice(5,7),0).getDate(), frac=day/dim;
+  const avg={}; lastMonths(4).slice(0,3).forEach(pm=>{ const x=monthTotals(pm).byCat; for(const k in x) avg[k]=(avg[k]||0)+x[k]/3; });
+  const fixedCats=[DEBT_CAT,BES_CAT,INS_CAT];
+  for(const c of S.settings.expenseCats){
+    const lim=effLimit(c), sp=tt.byCat[c]||0, r=lim>0?sp/lim:0;
+    if(lim>0 && !fixedCats.includes(c)){
+      if(r>=1) out.push({lv:'red',tx:`${c} bütçesi aşıldı: ${money(sp)} / ${money(lim)} (${money(sp-lim)} fazla)`});
+      else if(r>=0.8) out.push({lv:'amber',tx:`${c} bütçesi %${nf.format(r*100)} dolu; kalan ${money(lim-sp)}`});
+      else if(r>=0.5 && r>frac+0.25) out.push({lv:'amber',tx:`${c}: ayın ${day}. günündesin ama bütçe şimdiden %${nf.format(r*100)} dolu. Bu hızla ay sonunda yaklaşık ${money(sp/frac)} olur (limit ${money(lim)}).`});
+    }
+    const a=avg[c]||0;
+    if(a>0 && sp>a*1.5 && sp-a>=500 && !fixedCats.includes(c) && !(lim>0 && r>=0.8))
+      out.push({lv:'amber',tx:`${c} harcaman son 3 ay ortalamasının %${nf.format((sp/a-1)*100)} üzerinde (bu ay ${money(sp)}, ortalama ${money(a)})`});
+  }
+  if(tt.inc>0 && tt.exp>=tt.inc) out.push({lv:'red',tx:`Bu ay giderler geliri aştı: gelir ${money(tt.inc)}, gider ${money(tt.exp)}`});
+  else if(tt.inc>0 && tt.exp>=tt.inc*0.9) out.push({lv:'amber',tx:`Bu ay harcamaların gelirinin %${nf.format(tt.exp/tt.inc*100)} seviyesinde (gelir ${money(tt.inc)}, gider ${money(tt.exp)})`});
+  for(const x of S.stocks) if(num(x.price)>0 && num(x.target)>0 && num(x.price)<=num(x.target))
+    out.push({lv:'green',tx:`${x.symbol} hedef alım fiyatının altında: ${money2(num(x.price),x.currency)} (hedef ${money2(num(x.target),x.currency)})`});
+  for(const x of upcomingPayments(7)) out.push({lv:'info',tx:`${x.days===0?'Bugün':x.days===1?'Yarın':x.days+' gün sonra'} (${fmtDate(x.date)}): ${x.name} ${money(x.amount)}`});
+  const ord={red:0,amber:1,green:2,info:3};
+  return out.sort((a,b)=>ord[a.lv]-ord[b.lv]);
+}
+function alertsCard(){
+  const al=computeAlerts(); if(!al.length) return '';
+  return `<div class="card"><h3>🚨 Uyarılar ve hatırlatmalar</h3>${al.map(a=>`<div class="alert ${a.lv}">${a.lv==='red'?'⛔ ':a.lv==='amber'?'⚠️ ':a.lv==='green'?'💡 ':'📅 '}${esc(a.tx)}</div>`).join('')}</div>`;
+}
+
+// ---- Claude raporu ----
+function retNumbers(){
+  const R=S.retirement, r=R.realReturn/100, n=Math.max(0,R.retireAge-R.age), m=Math.max(0,R.lifeTo-R.retireAge), A=R.monthlyNeed*12;
+  const annuity = r!==0 ? A*(1-Math.pow(1+r,-m))/r : A*m, safe = R.wr>0 ? A/(R.wr/100) : annuity, g=Math.pow(1+r,n);
+  return {need:safe+R.lump, needMin:annuity+R.lump, fv:R.current*g+(r!==0?R.monthly*12*(g-1)/r:R.monthly*12*n)};
+}
+function buildReport(){
+  const t0=today(), m=ym(t0), t=monthTotals(m), w=worth(), eur=rate('EUR'), L=[];
+  const avg={}; lastMonths(4).slice(0,3).forEach(pm=>{ const x=monthTotals(pm).byCat; for(const k in x) avg[k]=(avg[k]||0)+x[k]/3; });
+  L.push(`AİLE FİNANS RAPORU — ${mLabel(m)} (rapor tarihi ${fmtDate(t0)}, ayın ${+t0.slice(8)}. günü)`);
+  L.push(`Kurlar: 1 € = ${nf2.format(rate('EUR'))} TL, 1 $ = ${nf2.format(rate('USD'))} TL, 1 £ = ${nf2.format(rate('GBP'))} TL`);
+  L.push('', '## Bu ay', `Gelir: ${money(t.inc)} | Gider: ${money(t.exp)} | Net: ${money(t.inc-t.exp)}`);
+  L.push('Gider kategorileri (bu ay / aylık bütçe / son 3 ay ortalaması):');
+  S.settings.expenseCats.forEach(c=>{ const sp=t.byCat[c]||0, lim=effLimit(c), a=avg[c]||0; if(sp||lim||a) L.push(`- ${c}: ${money(sp)} / ${lim?money(lim):'limit yok'} / ${money(a)}`); });
+  L.push('', '## Son 6 ay (gelir / gider / net)');
+  lastMonths(6).forEach(mm=>{ const x=monthTotals(mm); L.push(`- ${mLabel(mm)}: ${money(x.inc)} / ${money(x.exp)} / ${money(x.inc-x.exp)}`); });
+  L.push('', '## Varlıklar ve borçlar', `Toplam varlık: ${money(w.assets)} | Borç: ${money(w.debt)} | Net servet: ${money(w.net)}${eur?` (≈ ${money(w.net/eur,'EUR')})`:''} | Finansal varlıklar: ${money(w.fin)}`);
+  S.assets.forEach(a=>L.push(`- ${a.name} (${a.type}): ${a.type==='Borç'?'−':''}${money(assetTRY(a))}${isInstDebt(a)?` — ${num(a.left)} taksit × ${money(num(a.inst),a.currency)}`:''}`));
+  if(S.stocks.length){ L.push('', '## Hisse senetleri (hissenin para biriminde)');
+    S.stocks.forEach(x=>{ const k=stockCalc(x); L.push(`- ${x.symbol}${x.name?' ('+x.name+')':''}: ${num(x.shares)>0?`${num(x.shares)} adet, maliyet ${money2(num(x.cost),x.currency)}, `:'İZLEME LİSTESİ, '}fiyat ${num(x.price)?money2(num(x.price),x.currency):'yok'}${num(x.shares)>0?`, K/Z %${nf2.format(k.gainPct)}, değer ${money(k.valTRY)}`:''}${num(x.div)?`, yıllık temettü ${money2(num(x.div),x.currency)}/hisse (verim %${nf2.format(k.yld)})`:''}${num(x.target)?`, hedef alım ${money2(num(x.target),x.currency)}`:''}${x.note?`, not: ${x.note}`:''}`); });
+    L.push(`Toplam yıllık temettü (brüt): ${money(w.div)}`); }
+  if(S.bes.length){ L.push('', '## BES'); S.bes.forEach(b=>{ const v=besVest(b); L.push(`- ${b.name}: kendi ${money(num(b.own))}, devlet ${money(num(b.state))}, aylık katkı ${money(num(b.monthly))}, sistemde ${nf2.format(v.yrs)} yıl, hak ediş %${v.pct}`); }); }
+  if(S.policies.length){ L.push('', '## Birikimli hayat sigortaları'); S.policies.forEach(p=>L.push(`- ${p.name} (${p.company||'-'}, sigortalı ${p.insured}): birikim ${money(num(p.value),p.currency)}, teminat ${money(num(p.coverage),p.currency)}, prim ${money(num(p.premium),p.currency)} / ${FREQS.find(f=>f[0]===(num(p.freq)||1))[1].toLowerCase()}, başlangıç ${fmtDate(p.start)}, vade ${p.end?fmtDate(p.end):'-'}`)); }
+  if(S.goals.length){ L.push('', '## Hedefler'); S.goals.forEach(g=>L.push(`- ${g.name}: ${money(g.saved,g.currency)} / ${money(g.target,g.currency)}${g.date?', hedef tarih '+fmtDate(g.date):''}`)); }
+  const R=S.retirement, rn=retNumbers();
+  L.push('', '## Emeklilik planı (bugünkü euro ile, reel getiri)', `Yaş ${R.age}, emeklilik yaşı ${R.retireAge}, plan yaşı ${R.lifeTo}; emeklilikte aylık ihtiyaç ${money(R.monthlyNeed,'EUR')}; tek seferlik harcama ${money(R.lump,'EUR')}`,
+    `Bugünkü birikim ${money(R.current,'EUR')}, aylık birikim ${money(R.monthly,'EUR')}, reel getiri %${nf2.format(R.realReturn)}, çekim oranı %${nf2.format(R.wr)}`,
+    `Gereken sermaye (güvenli) ${money(rn.need,'EUR')}; emeklilikte tahmini birikim ${money(rn.fv,'EUR')}`);
+  const al=computeAlerts(); if(al.length){ L.push('', '## Programın uyarıları'); al.forEach(a=>L.push('- '+a.tx)); }
+  L.push('', '## Sorularım',
+    '1. Harcamalarımda nerede tasarruf edebilirim? Somut önerilerin neler?',
+    '2. Mevcut tasarruf ve yatırım temposuyla emeklilik hedefime ulaşabilir miyim? Neyi değiştirmeliyim?',
+    '3. Hisse portföyüm ve izleme listem temettü + adil değerin altında alım stratejime uygun mu? Dikkat etmem gereken riskler neler?',
+    '4. Borçlarım, BES ve hayat sigortalarım hakkında dikkat etmem gereken bir şey var mı?');
+  return L.join('\n');
+}
+function showReport(){
+  const txt=buildReport();
+  const o=document.createElement('div'); o.id='overlay';
+  o.innerHTML=`<div class="card"><h3>🤖 Claude için aylık rapor</h3>
+    <p class="note">Bu metni kopyala, Claude sohbetine yapıştır ve gönder. Hesap numarası gibi bilgiler içermez, sadece tutarlar vardır. İstersen göndermeden önce düzenleyebilirsin.</p>
+    <textarea id="repTxt"></textarea>
+    <div class="row" style="margin-top:10px"><button class="btn" onclick="copyReport()">📋 Kopyala</button><button class="btn sec" onclick="document.getElementById('overlay').remove()">Kapat</button><span class="note" id="copyMsg"></span></div></div>`;
+  document.body.appendChild(o); document.getElementById('repTxt').value=txt;
+  o.addEventListener('click',e=>{ if(e.target===o) o.remove(); });
+}
+async function copyReport(){
+  const ta=document.getElementById('repTxt'), msg=document.getElementById('copyMsg');
+  try { await navigator.clipboard.writeText(ta.value); }
+  catch(e){ ta.select(); document.execCommand('copy'); }
+  msg.textContent='✔ Kopyalandı. Şimdi Claude sohbetine yapıştır.';
 }
 
 // ---- Gelir / Gider ----
@@ -494,6 +603,7 @@ function vVarlik(){
     <form class="row" onsubmit="saveRates(event)">
       <label>1 Euro (TL)<input type="number" step="any" min="0" name="EUR" value="${r.EUR||''}" style="width:120px"></label>
       <label>1 Dolar (TL)<input type="number" step="any" min="0" name="USD" value="${r.USD||''}" style="width:120px"></label>
+      <label>1 Sterlin (TL)<input type="number" step="any" min="0" name="GBP" value="${r.GBP||''}" style="width:120px"></label>
       <label>1 gram altın (TL)<input type="number" step="any" min="0" name="GAU" value="${r.GAU||''}" style="width:130px"></label>
       <button class="btn sec">Elle kaydet</button>
       <button type="button" class="btn" onclick="fetchRates(true)">🌐 İnternetten güncelle</button></form>
@@ -520,8 +630,9 @@ function vVarlik(){
     <p class="note"><b>Nakit/döviz:</b> miktar = tutar, birim fiyat boş. <b>Altın:</b> miktar = gram, para birimi "Gram altın". <b>Hisse:</b> adet ve güncel fiyat; temettü hissenin para biriminde. <b>Borç:</b> kalan borç tutarı, toplamdan düşülür.</p></div>`;
   if(!S.assets.length) return h+`<p class="note">Henüz varlık eklenmedi.</p>`;
   const w=worth(), list=S.assets.slice().sort((x,y)=>ATYPES.indexOf(x.type)-ATYPES.indexOf(y.type));
-  h+=`<div class="grid">${stat('Toplam varlık',money(w.assets))}${stat('Borçlar',money(w.debt),'neg')}${stat('Net servet',money(w.net)+(eur?`<div class="note">≈ ${money(w.net/eur,'EUR')}</div>`:''),w.net>=0?'pos':'neg')}${stat('Finansal varlıklar (net)',money(w.fin)+'<div class="note">Gayrimenkul ve araç hariç'+(w.bes||w.ins?', BES/sigorta dahil':'')+'</div>')}</div>`;
-  if(w.bes || w.ins) h+=`<p class="note">Toplamlara ${w.bes?`BES'in hak edilen kısmı (${money(w.bes)})`:''}${w.bes&&w.ins?' ve ':''}${w.ins?`hayat sigortası birikimleri (${money(w.ins)})`:''} dahildir.</p>`;
+  h+=`<div class="grid">${stat('Toplam varlık',money(w.assets))}${stat('Borçlar',money(w.debt),'neg')}${stat('Net servet',money(w.net)+(eur?`<div class="note">≈ ${money(w.net/eur,'EUR')}</div>`:''),w.net>=0?'pos':'neg')}${stat('Finansal varlıklar (net)',money(w.fin)+'<div class="note">Gayrimenkul ve araç hariç'+(w.bes||w.ins||w.stk?', hisse/BES/sigorta dahil':'')+'</div>')}</div>`;
+  const extra=[w.stk?`hisse portföyü (${money(w.stk)})`:'', w.bes?`BES'in hak edilen kısmı (${money(w.bes)})`:'', w.ins?`hayat sigortası birikimleri (${money(w.ins)})`:''].filter(Boolean);
+  if(extra.length) h+=`<p class="note">Toplamlara ${extra.join(', ')} dahildir.</p>`;
   h+=`<div class="card"><div class="scroll"><table><tr><th>Adı</th><th>Tür</th><th class="num">Miktar</th><th class="num">Değer (TL)</th>${eur?'<th class="num">Değer (€)</th>':''}<th class="num">Yıllık temettü</th><th class="num">Pay</th><th></th></tr>`+
     list.map(x=>{ const v=assetTRY(x), d=assetDivTRY(x), debt=x.type==='Borç';
       return `<tr><td>${esc(x.name)}</td><td>${esc(x.type)}</td><td class="num">${isInstDebt(x)?(num(x.left)>0?`${nf.format(num(x.left))} taksit × ${money(num(x.inst),x.currency)}<div class="note">her ayın ${num(x.day)||1}'i</div>`:'<span class="pos">Bitti 🎉</span>'):''}${isInstDebt(x)?'':x.price!==''&&x.price!=null&&num(x.price)!==1?`${nf2.format(num(x.qty))} adet<div class="note">× ${money(num(x.price),x.currency).replace(/^(\S+)/,()=>nf2.format(num(x.price)))}</div>`:money(num(x.qty),x.currency)}</td>
@@ -533,7 +644,7 @@ function vVarlik(){
 }
 function saveRates(ev){
   ev.preventDefault(); const f=ev.target;
-  S.settings.rates={EUR:num(f.EUR.value),USD:num(f.USD.value),GAU:num(f.GAU.value)};
+  S.settings.rates={EUR:num(f.EUR.value),USD:num(f.USD.value),GBP:num(f.GBP.value),GAU:num(f.GAU.value)};
   S.settings.ratesDate=today(); save(); render();
 }
 function addAsset(ev){
@@ -554,6 +665,155 @@ function addAsset(ev){
 }
 function editAssetFn(id){ editAsset=id; render(); window.scrollTo(0,0); }
 function delAsset(id){ if(!confirm('Bu kayıt silinsin mi?')) return; S.assets=S.assets.filter(a=>a.id!==id); save(); render(); }
+
+// ---- Hisseler ----
+const SCURS=[['USD','Dolar ($)'],['EUR','Euro (€)'],['GBP','Sterlin (£)'],['GBX','Peni (GBX) – Londra'],['TRY','TL']];
+const AV_URL='https://www.alphavantage.co/query?';
+let priceBusy=false, priceMsg='';
+function parseMonths(str){ return [...new Set(String(str||'').split(/[^0-9]+/).map(Number).filter(m=>m>=1&&m<=12))].sort((a,b)=>a-b); }
+function stockCalc(x){
+  const sh=num(x.shares), p=num(x.price)||num(x.cost), val=sh*p, cost=sh*num(x.cost), gain=val-cost;
+  return {p, val, cost, gain, gainPct:cost>0?gain/cost*100:0, valTRY:toTRY(val,x.currency), costTRY:toTRY(cost,x.currency),
+          divTRY:toTRY(sh*num(x.div),x.currency), yld:p>0?num(x.div)/p*100:0, yoc:num(x.cost)>0?num(x.div)/num(x.cost)*100:0};
+}
+function targetStatus(x){
+  const p=num(x.price), t=num(x.target); if(!(p>0 && t>0)) return '';
+  if(p<=t) return '<span class="pos">🟢 Hedefin altında</span>';
+  const d=(p/t-1)*100;
+  return d<=5 ? `<span style="color:var(--amber)">🟡 Hedefe %${nf2.format(d)}</span>` : `<span class="note">Hedefe %${nf.format(d)} var</span>`;
+}
+function avgSaving(){ let tot=0,n=0; lastMonths(4).slice(0,3).forEach(m=>{ const t=monthTotals(m); if(t.inc||t.exp){ tot+=t.inc-t.exp; n++; } }); return n?tot/n:0; }
+function vHisse(){
+  const e=editStock?S.stocks.find(x=>x.id===editStock):null, eur=rate('EUR');
+  let h=`<h2>📈 Hisse Senetleri</h2>`+ratesWarn();
+  if(!S.settings.avKey) h+=`<div class="warn">Fiyatların internetten otomatik gelmesi için ücretsiz bir Alpha Vantage anahtarı gerekiyor. <a href="#" onclick="show('ayar');return false">Ayarlar'dan ekle →</a> Anahtar olmadan da fiyatları elle girebilirsin.</div>`;
+  h+=`<div class="card"><h3>${e?'Hisseyi düzenle':'Hisse ekle'}</h3>
+    ${S.settings.avKey&&!e?`<div class="row" style="margin-bottom:10px"><label style="flex:1;min-width:220px">🔎 Sembol ara (şirket adı ya da sembol)<input id="srchQ" placeholder="ör. Unilever, Coca-Cola, Allianz" onkeydown="if(event.key==='Enter'){event.preventDefault();searchSymbol()}"></label><button type="button" class="btn sec" onclick="searchSymbol()">Ara</button></div><div id="srchRes"></div>`:''}
+    <form class="row" onsubmit="addStock(event)">
+      <label>Sembol<input name="symbol" required value="${esc(e?e.symbol:'')}" placeholder="ör. KO, ULVR.LON, ALV.DEX" style="width:150px"></label>
+      <label>Şirket adı<input name="name" value="${esc(e?e.name:'')}"></label>
+      <label>Para birimi<select name="currency">${optsKV(SCURS,e?e.currency:'USD')}</select></label>
+      <label>Adet (0 = izleme listesi)<input type="number" name="shares" step="any" min="0" value="${e?e.shares:''}" placeholder="0" style="width:120px"></label>
+      <label>Ortalama maliyet / hisse<input type="number" name="cost" step="any" min="0" value="${e&&e.cost?e.cost:''}" style="width:130px"></label>
+      <label>Güncel fiyat<input type="number" name="price" step="any" min="0" value="${e&&e.price?e.price:''}" placeholder="otomatik" style="width:120px"></label>
+      <label>Yıllık temettü / hisse<input type="number" name="div" step="any" min="0" value="${e&&e.div?e.div:''}" placeholder="brüt" style="width:130px"></label>
+      <label>Temettü ayları<input name="divMonths" value="${esc(e?e.divMonths||'':'')}" placeholder="ör. 3,6,9,12" style="width:120px"></label>
+      <label>Hedef alım fiyatı<input type="number" name="target" step="any" min="0" value="${e&&e.target?e.target:''}" placeholder="adil değer altı" style="width:130px"></label>
+      <label style="flex:1;min-width:140px">Not<input name="note" value="${esc(e?e.note||'':'')}"></label>
+      <button class="btn">${e?'Kaydet':'Ekle'}</button>
+      ${e?'<button type="button" class="btn sec" onclick="editStock=null;render()">Vazgeç</button>':''}
+    </form>
+    <p class="note"><b>Sembol:</b> ABD hisseleri olduğu gibi (KO, JNJ). Diğer borsalarda sonuna borsa eki gelir: Londra <b>.LON</b>, Almanya <b>.DEX</b>, Kanada <b>.TRT</b>. Emin değilsen yukarıdaki aramayı kullan. Londra fiyatları genelde <b>peni (GBX)</b> olarak gelir; 100 peni = 1 £. Tüm tutarlar hissenin kendi para biriminde, temettüler vergi öncesi (brüt).</p></div>`;
+  h+=`<div class="row" style="margin-bottom:16px"><button class="btn" onclick="fetchPrices(true)" ${priceBusy?'disabled':''}>🌐 Fiyatları güncelle</button><span class="note" id="priceMsg">${esc(priceMsg)}</span></div>`;
+  const own=S.stocks.filter(x=>num(x.shares)>0), watch=S.stocks.filter(x=>!(num(x.shares)>0));
+  if(own.length){
+    let v=0,c=0,d=0; own.forEach(x=>{ const k=stockCalc(x); v+=k.valTRY; c+=k.costTRY; d+=k.divTRY; });
+    const g=v-c;
+    h+=`<div class="grid">${stat('Portföy değeri',money(v)+(eur?`<div class="note">≈ ${money(v/eur,'EUR')}</div>`:''))}${stat('Kâr / zarar',(g>=0?'+':'')+money(g)+`<div class="note">%${nf2.format(c?g/c*100:0)} (maliyete göre, bugünkü kurla)</div>`,g>=0?'pos':'neg')}${stat('Yıllık temettü (brüt)',money(d)+`<div class="note">Aylık ≈ ${money(d/12)} · verim %${nf2.format(v?d/v*100:0)}</div>`,'pos')}</div>`;
+    h+=`<div class="card"><h3>Portföyüm</h3><div class="scroll"><table><tr><th>Hisse</th><th class="num">Adet</th><th class="num">Maliyet</th><th class="num">Fiyat</th><th class="num">Değer (TL)</th><th class="num">K/Z</th><th class="num">Temettü verimi</th><th>Hedef</th><th></th></tr>`+
+      own.map(x=>{ const k=stockCalc(x);
+        return `<tr><td><b>${esc(x.symbol)}</b><div class="note">${esc(x.name||'')}</div></td><td class="num">${nf2.format(num(x.shares))}</td>
+          <td class="num">${money2(num(x.cost),x.currency)}</td>
+          <td class="num">${num(x.price)?money2(num(x.price),x.currency):'<span class="note">—</span>'}<div class="note">${x.priceDate?fmtDate(x.priceDate):'fiyat yok'}${isFinite(num(x.changePct))&&x.changePct!=null&&x.priceDate?` · <span class="${x.changePct>=0?'pos':'neg'}">%${nf2.format(x.changePct)}</span>`:''}</div></td>
+          <td class="num">${money(k.valTRY)}</td>
+          <td class="num ${k.gain>=0?'pos':'neg'}">${k.gain>=0?'+':''}${x.currency==='GBX'?money(k.gain/100,'GBP'):money(k.gain,x.currency)}<div class="note">%${nf2.format(k.gainPct)}</div></td>
+          <td class="num">${num(x.div)?'%'+nf2.format(k.yld):''}<div class="note">${num(x.div)&&num(x.cost)?'maliyete %'+nf2.format(k.yoc):''}</div></td>
+          <td>${num(x.target)?money2(num(x.target),x.currency)+'<br>'+targetStatus(x):''}</td>
+          <td class="num"><button class="link" onclick="editStockFn('${x.id}')">düzenle</button><button class="link del" onclick="delStock('${x.id}')">sil</button></td></tr>`; }).join('')+`</table></div></div>`;
+    h+=divCalendar(own);
+  }
+  h+=`<div class="card"><h3>🔭 İzleme listesi (almayı düşündüklerin)</h3>`;
+  if(!watch.length) h+=`<p class="note">Almayı düşündüğün hisseleri adet = 0 olarak ekle ve hedef alım fiyatı gir. Fiyat hedefin altına inince Özet sayfasında uyarı çıkar.</p>`;
+  else h+=`<div class="scroll"><table><tr><th>Hisse</th><th class="num">Fiyat</th><th class="num">Hedef</th><th>Durum</th><th class="num">Temettü verimi</th><th>Not</th><th></th></tr>`+
+    watch.map(x=>`<tr><td><b>${esc(x.symbol)}</b><div class="note">${esc(x.name||'')}</div></td><td class="num">${num(x.price)?money2(num(x.price),x.currency):'—'}<div class="note">${x.priceDate?fmtDate(x.priceDate):''}</div></td>
+      <td class="num">${num(x.target)?money2(num(x.target),x.currency):'—'}</td><td>${targetStatus(x)}</td>
+      <td class="num">${num(x.div)&&num(x.price)?'%'+nf2.format(num(x.div)/num(x.price)*100):''}</td><td class="note">${esc(x.note||'')}</td>
+      <td class="num"><button class="link" onclick="editStockFn('${x.id}')">düzenle</button><button class="link del" onclick="delStock('${x.id}')">sil</button></td></tr>`).join('')+`</table></div>`;
+  h+=`</div>`+investPlan();
+  return h;
+}
+function divCalendar(own){
+  const per=Array(12).fill(0); let noMonth=[];
+  own.forEach(x=>{ if(!num(x.div)) return; const ms=parseMonths(x.divMonths); if(!ms.length){ noMonth.push(x.symbol); return; }
+    const each=toTRY(num(x.shares)*num(x.div)/ms.length,x.currency); ms.forEach(m=>per[m-1]+=each); });
+  if(!per.some(v=>v>0) && !noMonth.length) return '';
+  const max=Math.max(1,...per), W=600, H=150, bw=W/12;
+  let svg=`<svg viewBox="0 0 ${W} ${H+40}" width="100%" role="img" aria-label="Aylık temettü takvimi">`;
+  per.forEach((v,i)=>{ const hh=v/max*H, x=i*bw;
+    svg+=`<rect x="${(x+bw*0.18).toFixed(1)}" y="${(H-hh).toFixed(1)}" width="${(bw*0.64).toFixed(1)}" height="${hh.toFixed(1)}" fill="#1f6f5c" rx="3"><title>${AYLAR[i]}: ${money(v)}</title></rect>`;
+    if(v>0) svg+=`<text x="${(x+bw/2).toFixed(1)}" y="${(H-hh-4).toFixed(1)}" text-anchor="middle" font-size="10" fill="#1d2433">${v>=1e4?nf.format(v/1e3)+' B':nf.format(v)}</text>`;
+    svg+=`<text x="${(x+bw/2).toFixed(1)}" y="${H+18}" text-anchor="middle" font-size="12" fill="#6b7385">${AYLAR[i]}</text>`; });
+  svg+=`</svg>`;
+  return `<div class="card"><h3>📅 Temettü takvimi (tahmini, brüt, TL)</h3>${svg}${noMonth.length?`<p class="note">Ödeme ayı girilmemiş: ${noMonth.map(esc).join(', ')} (düzenle → Temettü ayları).</p>`:''}</div>`;
+}
+function investPlan(){
+  const R=S.retirement, eur=rate('EUR'), sav=avgSaving(), n=Math.max(0,R.retireAge-R.age), r=R.realReturn/100;
+  const savE=eur?sav/eur:0, fvAdd= r!==0 ? savE*12*(Math.pow(1+r,n)-1)/r : savE*12*n;
+  const w=worth(); const yld=w.stk>0?w.div/w.stk*100:4;
+  const needDiv = yld>0 ? R.monthlyNeed*12/(yld/100) : 0;
+  let h=`<div class="card"><h3>🧭 Gelecek yatırım planı</h3>`;
+  h+=`<table><tr><td>Son 3 ayın ortalama aylık tasarrufu (gelir − gider)</td><td class="num"><b class="${sav>=0?'pos':'neg'}">${money(sav)}</b>${eur?`<div class="note">≈ ${money(savE,'EUR')}</div>`:''}</td></tr>`;
+  if(sav>0 && eur) h+=`<tr><td>Bunu her ay ${n} yıl yatırırsan (yıllık reel %${nf2.format(R.realReturn)})</td><td class="num"><b>${money(fvAdd,'EUR')}</b><div class="note">bugünkü parayla</div></td></tr>`;
+  h+=`<tr><td>Emeklilikte aylık ${money(R.monthlyNeed,'EUR')} <b>sadece temettüden</b> gelsin istersen gereken portföy (verim %${nf2.format(yld)}${w.stk>0?', portföyünün verimi':', varsayım'})</td><td class="num"><b>${money(needDiv,'EUR')}</b>${eur&&w.stk?`<div class="note">şu an: ${money(w.stk/eur,'EUR')} (%${nf.format(w.stk/eur/needDiv*100)})</div>`:''}</td></tr></table>`;
+  if(sav>0 && eur) h+=`<div class="row" style="margin-top:10px"><button class="btn sec" onclick="S.retirement.monthly=${Math.round(savE)};save();alert('Emeklilik hesaplayıcısında aylık birikim ${nf.format(Math.round(savE))} € yapıldı.')">Bu tasarrufu emeklilik hesabına aktar</button></div>`;
+  h+=`<p class="note">Tasarruf ortalaması Gelir/Gider kayıtlarından hesaplanır; birkaç ay düzenli kayıt girince anlamlı olur. Emeklilik yaşı, ihtiyaç ve getiri varsayımları Emeklilik sekmesinden gelir.</p></div>`;
+  return h;
+}
+function addStock(ev){
+  ev.preventDefault(); const f=ev.target, old=editStock?S.stocks.find(x=>x.id===editStock):null;
+  const sym=f.symbol.value.trim().toUpperCase();
+  if(!old && S.stocks.some(x=>x.symbol===sym)){ alert(sym+' zaten listede. Düzenle ile güncelleyebilirsin.'); return; }
+  const x={id:editStock||uid(), symbol:sym, name:f.name.value.trim(), currency:f.currency.value, shares:num(f.shares.value), cost:num(f.cost.value),
+           price:num(f.price.value), div:num(f.div.value), divMonths:parseMonths(f.divMonths.value).join(','), target:num(f.target.value), note:f.note.value.trim(),
+           priceDate: old && num(f.price.value)===num(old.price) ? old.priceDate||'' : (num(f.price.value)?today():''), changePct: old&&num(f.price.value)===num(old.price)?old.changePct:null};
+  if(x.shares>0 && !x.cost){ alert('Elindeki hisse için ortalama maliyeti gir (izleme listesi için adet 0 bırak).'); return; }
+  if(old){ S.stocks[S.stocks.indexOf(old)]=x; editStock=null; } else S.stocks.push(x);
+  save(); render();
+  if(S.settings.avKey && !x.price) fetchPrices(true,[x.id]);
+}
+function editStockFn(id){ editStock=id; render(); window.scrollTo(0,0); }
+function delStock(id){ if(!confirm('Bu hisse silinsin mi?')) return; S.stocks=S.stocks.filter(x=>x.id!==id); save(); render(); }
+function avErr(d){ const m=d && (d.Note||d.Information||d['Error Message']); return m?String(m):''; }
+async function fetchPrices(manual,ids){
+  const key=S.settings.avKey;
+  if(!key){ if(manual) alert("Önce Ayarlar & Yedek sekmesinden ücretsiz Alpha Vantage anahtarını gir."); return; }
+  if(priceBusy){ if(manual) alert('Fiyatlar şu an güncelleniyor, lütfen bekle.'); return; }
+  const list=S.stocks.filter(x=>x.symbol && (ids ? ids.includes(x.id) : (manual || x.priceDate!==today())));
+  if(!list.length){ if(manual) alert('Güncellenecek hisse yok.'); return; }
+  priceBusy=true; let ok=0, fail=[], limit=false;
+  const setMsg=t=>{ priceMsg=t; const el=document.getElementById('priceMsg'); if(el) el.textContent=t; updateStatus(); };
+  for(let i=0;i<list.length;i++){
+    const x=list[i]; setMsg(`⏳ Hisse fiyatları alınıyor: ${i+1}/${list.length} (${x.symbol})`+(list.length>1?' · ücretsiz plan dakikada 5 sorguya izin verdiği için yavaş ilerler':''));
+    try {
+      const d=await getJSON(AV_URL+'function=GLOBAL_QUOTE&symbol='+encodeURIComponent(x.symbol)+'&apikey='+encodeURIComponent(key));
+      const q=d['Global Quote'], p=q && parseFloat(q['05. price']);
+      if(p>0){ x.price=p; x.priceDate=today(); x.changePct=parseFloat(String(q['10. change percent']||'').replace('%','')); ok++; save(); }
+      else { fail.push(x.symbol); const m=avErr(d); if(/per day|daily|25 requests/i.test(m)){ limit=true; break; } }
+    } catch(e){ fail.push(x.symbol); }
+    if(i<list.length-1) await new Promise(r=>setTimeout(r,13000));
+  }
+  priceBusy=false;
+  setMsg(limit ? `⚠️ Günlük ücretsiz sorgu hakkı (25) doldu; ${ok} hisse güncellendi. Kalanlar yarın.` :
+    `📈 ${ok} hisse fiyatı güncellendi`+(fail.length?` · alınamadı: ${fail.join(', ')} (sembolü kontrol et ya da fiyatı elle gir)`:''));
+  if(manual || !formDirty()) render();
+}
+async function searchSymbol(){
+  const q=(document.getElementById('srchQ')||{}).value||''; const box=document.getElementById('srchRes'); if(!q.trim()||!box) return;
+  box.innerHTML='<p class="note">⏳ Aranıyor…</p>';
+  try {
+    const d=await getJSON(AV_URL+'function=SYMBOL_SEARCH&keywords='+encodeURIComponent(q.trim())+'&apikey='+encodeURIComponent(S.settings.avKey));
+    const m=(d.bestMatches||[]).filter(x=>/Equity|ETF/i.test(x['3. type']||''));
+    if(!m.length){ box.innerHTML=`<p class="note">Sonuç bulunamadı. ${esc(avErr(d))}</p>`; return; }
+    window._srch=m;
+    box.innerHTML='<div class="srch">'+m.map((x,i)=>`<div onclick="pickSymbol(${i})"><b>${esc(x['1. symbol'])}</b> — ${esc(x['2. name'])} <span class="note">· ${esc(x['4. region'])} · ${esc(x['8. currency'])} · ${esc(x['3. type'])}</span></div>`).join('')+'</div>';
+  } catch(e){ box.innerHTML='<p class="note">Arama yapılamadı (internet bağlantısı?).</p>'; }
+}
+function pickSymbol(i){
+  const x=(window._srch||[])[i], f=document.querySelector('main form'); if(!x||!f) return;
+  f.symbol.value=x['1. symbol']; f.name.value=x['2. name'];
+  const c=String(x['8. currency']||'').toUpperCase(); f.currency.value = c==='GBX'||c==='GBP'&&/\.LON$/.test(x['1. symbol'])?'GBX' : ['USD','EUR','GBP','TRY'].includes(c)?c:'USD';
+  document.getElementById('srchRes').innerHTML=''; f.shares.focus();
+}
 
 // ---- BES ----
 function besVest(b){
@@ -811,6 +1071,13 @@ function vAyar(){
     <div class="row"><button class="btn sec" onclick="checkUpdate()">Güncellemeleri kontrol et</button>
     ${installEvt?'<button class="btn" onclick="installApp()">💻 Bilgisayara uygulama olarak yükle</button>':''}</div>
     <p class="note">Yeni sürüm çıktığında ekranın altında "Güncelle" düğmesi belirir. Program ayrıca açılışta ve saatte bir kendisi kontrol eder.</p></div>`;
+  h+=`<div class="card"><h3>📈 Hisse fiyatları (Alpha Vantage)</h3>
+    <p>Yabancı hisse fiyatlarının otomatik gelmesi için ücretsiz bir anahtar gerekir:</p>
+    <ol><li><a href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noopener">alphavantage.co/support/#api-key</a> adresini aç.</li>
+      <li>"Investor" seç, kurum yerine kendi adını, e-posta adresini yaz ve <b>GET FREE API KEY</b>'e bas.</li>
+      <li>Ekranda çıkan harf-rakam karışık anahtarı kopyalayıp aşağıya yapıştır.</li></ol>
+    <form class="row" onsubmit="saveAvKey(event)" style="margin-top:10px"><label style="flex:1;min-width:220px">Anahtar<input name="key" value="${esc(st.avKey||'')}" autocomplete="off" placeholder="ör. A1B2C3D4E5F6G7H8"></label><button class="btn">Kaydet ve dene</button></form>
+    <p class="note">Ücretsiz plan günde 25, dakikada 5 sorgu verir. Program her hisseyi günde bir kez günceller; çok hisse varsa güncelleme birkaç dakika sürer. Anahtar sadece bu bilgisayarda saklanır.</p></div>`;
   h+=`<div class="card"><h3>🌐 İnternet</h3><label style="flex-direction:row;align-items:center;gap:8px;font-size:15px;color:var(--ink)">
     <input type="checkbox" ${st.autoRates?'checked':''} onchange="S.settings.autoRates=this.checked;save()"> Program açılınca döviz ve altın kurlarını internetten otomatik güncelle</label>
     <p class="note">Program internete sadece kurları almak için bağlanır. Senin verilerin hiçbir yere gönderilmez; hepsi bu bilgisayarda kalır.</p></div>`;
@@ -824,6 +1091,15 @@ function vAyar(){
   h+=`<div class="card"><h3>Tehlikeli bölge</h3><button class="btn danger" onclick="resetAll()">Tüm verileri sil</button>
     <p class="note">Silmeden önce mutlaka yedek indir.</p></div>`;
   return h;
+}
+async function saveAvKey(ev){
+  ev.preventDefault(); const k=ev.target.key.value.trim(); S.settings.avKey=k; save();
+  if(!k){ render(); return; }
+  try { const d=await getJSON(AV_URL+'function=GLOBAL_QUOTE&symbol=KO&apikey='+encodeURIComponent(k));
+    if(d['Global Quote'] && d['Global Quote']['05. price']) alert('✅ Anahtar çalışıyor! (Deneme: Coca-Cola = '+d['Global Quote']['05. price']+' $)');
+    else alert('Anahtar kaydedildi ama deneme cevabı beklenmedik:\n'+(avErr(d)||JSON.stringify(d).slice(0,200)));
+  } catch(e){ alert('Anahtar kaydedildi ama deneme yapılamadı (internet bağlantısı?).'); }
+  render();
 }
 function saveSettings(ev){
   ev.preventDefault(); const f=ev.target;
@@ -911,6 +1187,7 @@ window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); installEv
 async function installApp(){ if(!installEvt) return; installEvt.prompt(); await installEvt.userChoice; installEvt=null; render(); }
 if(navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
 if(S.settings.autoRates && S.settings.ratesDate!==today()) fetchRates(false);
+if(S.settings.avKey && S.stocks.some(x=>x.priceDate!==today())) setTimeout(()=>fetchPrices(false),1500);
 </script>
 </body>
 </html>
