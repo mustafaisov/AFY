@@ -79,6 +79,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
   <button data-tab="hisse" onclick="show('hisse')">📈 Hisseler</button>
   <button data-tab="bes" onclick="show('bes')">🏦 BES</button>
   <button data-tab="sigorta" onclick="show('sigorta')">🛡️ Hayat Sigortaları</button>
+  <button data-tab="gsig" onclick="show('gsig')">🏥 Diğer Sigortalar</button>
   <button data-tab="hedef" onclick="show('hedef')">🏁 Hedefler</button>
   <button data-tab="emekli" onclick="show('emekli')">🌴 Emeklilik</button>
   <button data-tab="ayar" onclick="show('ayar')">⚙️ Ayarlar & Yedek</button>
@@ -92,13 +93,15 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 'use strict';
 // ---------- Yardımcılar ----------
 const KEY = 'aileFinans_v1';
-const APP_VERSION = '1.8.3';
+const APP_VERSION = '1.9.0';
 const AYLAR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
 const CURS = [['TRY','TL'],['EUR','Euro'],['USD','Dolar']];
 const CURS_A = [...CURS, ['GAU','Gram altın']];
 const ATYPES = ['Nakit/Banka','Döviz','Altın','Hisse/Fon','Gayrimenkul','Araç','Diğer','Borç'];
 const NON_FIN = ['Gayrimenkul','Araç'];
-const DEBT_CAT = 'Kredi/Borç ödemesi', BES_CAT = 'BES katkısı', INS_CAT = 'Hayat sigortası primi';
+const DEBT_CAT = 'Kredi/Borç ödemesi', BES_CAT = 'BES katkısı', INS_CAT = 'Hayat sigortası primi', OINS_CAT = 'Sigorta (sağlık, DASK, konut)';
+const OINS_TYPES = ['Sağlık','DASK','Konut','Kasko','Trafik','Seyahat','Diğer'];
+function normKey(x){ return String(x||'').toLocaleLowerCase('tr').replace(/\s+/g,''); }
 const FREQS = [[1,'Aylık'],[3,'3 ayda bir'],[6,'6 ayda bir'],[12,'Yıllık']];
 const nf = new Intl.NumberFormat('tr-TR',{maximumFractionDigits:0});
 const nf2 = new Intl.NumberFormat('tr-TR',{maximumFractionDigits:2});
@@ -135,7 +138,7 @@ function defaults(){
       incomeCats:['Maaş','Ticari gelir','Kira geliri','Temettü','Faiz','Diğer'],
       rates:{EUR:0,USD:0,GAU:0,GBP:0}, avKey:'', ratesDate:'', ratesSourceDate:'', autoRates:true, lastBackup:''
     },
-    transactions:[], budgets:{}, assets:[], goals:[], bes:[], policies:[], stocks:[],
+    transactions:[], budgets:{}, assets:[], goals:[], bes:[], policies:[], stocks:[], insurances:[],
     retirement:{age:48,retireAge:58,lifeTo:90,monthlyNeed:5000,current:0,monthly:0,realReturn:3.5,wr:3.5,lump:0}
   };
 }
@@ -281,6 +284,71 @@ let lastAct=Date.now();
 ['mousemove','mousedown','keydown','touchstart','scroll','wheel'].forEach(ev=>window.addEventListener(ev,()=>{ lastAct=Date.now(); },{passive:true}));
 setInterval(()=>{ if(LOCK && DK && num(LOCK.autoMin)>0 && Date.now()-lastAct>num(LOCK.autoMin)*60000) lockNow(); },15000);
 
+// ---------- Belgeler (PDF): tarayıcının dosya deposunda (IndexedDB), kilit açıksa şifreli ----------
+const DOC_DB='aileFinansDocs', DOC_ST='docs';
+function idb(){ return new Promise((res,rej)=>{ const r=indexedDB.open(DOC_DB,1); r.onupgradeneeded=()=>r.result.createObjectStore(DOC_ST); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
+async function idbOp(mode,fn){ const db=await idb(); return new Promise((res,rej)=>{ const tx=db.transaction(DOC_ST,mode), rq=fn(tx.objectStore(DOC_ST)); tx.oncomplete=()=>res(rq&&rq.result); tx.onerror=()=>rej(tx.error); tx.onabort=()=>rej(tx.error); }); }
+const idbGet=k=>idbOp('readonly',st=>st.get(k)), idbPut=(k,v)=>idbOp('readwrite',st=>st.put(v,k)), idbDel=k=>idbOp('readwrite',st=>st.delete(k)), idbKeys=()=>idbOp('readonly',st=>st.getAllKeys());
+async function docRecord(name,type,bytes){
+  if(LOCK && DK){ const iv=rnd(12); return {name,type,enc:true,iv,data:await crypto.subtle.encrypt({name:'AES-GCM',iv},DK,bytes)}; }
+  return {name,type,enc:false,data:bytes};
+}
+async function storeDoc(name,type,bytes,id){ id=id||('doc_'+uid()); await idbPut(id, await docRecord(name,type||'application/pdf',bytes)); return id; }
+async function loadDocBytes(id){
+  const r=await idbGet(id); if(!r) throw new Error('belge bu bilgisayarda bulunamadı');
+  if(r.enc){ if(!DK) throw new Error('program kilitli'); return {name:r.name,type:r.type,bytes:await crypto.subtle.decrypt({name:'AES-GCM',iv:r.iv},DK,r.data)}; }
+  return {name:r.name,type:r.type,bytes:r.data};
+}
+async function openDoc(id){
+  let d; try { d=await loadDocBytes(id); } catch(e){ alert('Belge açılamadı: '+e.message); return; }
+  const type=d.type||'application/pdf', url=URL.createObjectURL(new Blob([d.bytes],{type}));
+  const o=document.createElement('div'); o.id='overlay';
+  o.innerHTML=`<div class="card" style="max-width:1000px;height:92vh;padding:12px"><div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px">
+      <b style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%">📄 ${esc(d.name)}</b>
+      <div class="row"><a class="btn sec" href="${url}" download="${esc(d.name)}" style="text-decoration:none">⬇️ İndir</a><a class="btn sec" href="${url}" target="_blank" rel="noopener" style="text-decoration:none">↗ Yeni sekmede aç</a><button class="btn" id="docClose">Kapat</button></div></div>
+    ${type.startsWith('image/')?`<img src="${url}" style="max-width:100%;max-height:100%;object-fit:contain;flex:1">`:`<iframe src="${url}" title="${esc(d.name)}" style="flex:1;width:100%;border:1px solid var(--line);border-radius:8px"></iframe>`}</div>`;
+  document.body.appendChild(o);
+  const close=()=>{ o.remove(); setTimeout(()=>URL.revokeObjectURL(url),1000); };
+  o.querySelector('#docClose').onclick=close; o.addEventListener('click',e=>{ if(e.target===o) close(); });
+}
+async function reEncryptDocs(encrypt){
+  for(const k of await idbKeys()){
+    const r=await idbGet(k); if(!r) continue;
+    if(encrypt && !r.enc) await idbPut(k, await docRecord(r.name,r.type,r.data));
+    else if(!encrypt && r.enc) await idbPut(k,{name:r.name,type:r.type,enc:false,data:await crypto.subtle.decrypt({name:'AES-GCM',iv:r.iv},DK,r.data)});
+  }
+}
+function docOwner(kind,id){ const list={pol:S.policies, ins:S.insurances, bes:S.bes}[kind]; return list && list.find(x=>x.id===id); }
+function docsHtml(kind,o){
+  const ds=o.docs||[];
+  return `<div class="row" style="margin-top:8px;gap:6px;align-items:center">${ds.map(d=>`<span style="background:var(--accent2);border-radius:6px;padding:4px 8px;font-size:13px;white-space:nowrap"><a href="#" onclick="openDoc('${d.id}');return false">📄 ${esc(d.name)}</a><button class="link del" title="Belgeyi sil" onclick="delDoc('${kind}','${o.id}','${d.id}')">✕</button></span>`).join('')}
+    <label style="cursor:pointer;flex-direction:row;font-size:13px;color:var(--accent);padding:4px 6px">📎 PDF ekle<input type="file" accept="application/pdf,image/*" multiple style="display:none" onchange="attachDocs(this,'${kind}','${o.id}')"></label></div>`;
+}
+async function attachDocs(inp,kind,id){
+  const o=docOwner(kind,id), files=[...inp.files]; inp.value=''; if(!o) return;
+  try {
+    for(const f of files){
+      if(f.size>25e6){ alert(f.name+' çok büyük (25 MB üstü).'); continue; }
+      const did=await storeDoc(f.name,f.type,await f.arrayBuffer());
+      (o.docs=o.docs||[]).push({id:did,name:f.name,size:f.size,added:today()});
+    }
+    save(); render();
+  } catch(e){ alert('Belge eklenemedi: '+e.message); }
+}
+async function delDoc(kind,id,did){
+  const o=docOwner(kind,id); if(!o || !confirm('Bu belge silinsin mi?')) return;
+  o.docs=(o.docs||[]).filter(d=>d.id!==did); save(); render(); try { await idbDel(did); } catch(e){}
+}
+async function delDocsOf(o){ for(const d of (o&&o.docs)||[]) { try { await idbDel(d.id); } catch(e){} } }
+async function collectDocs(){
+  const out={};
+  for(const o of [...S.policies,...S.insurances,...S.bes]) for(const d of o.docs||[]){
+    try { const x=await loadDocBytes(d.id); out[d.id]={name:x.name,type:x.type,b64:b64e(x.bytes)}; } catch(e){}
+  }
+  return out;
+}
+async function restoreDocs(docs){ for(const [id,d] of Object.entries(docs||{})) await storeDoc(d.name,d.type,b64d(d.b64).buffer,id); }
+
 // ---- Kilit ayarları
 async function enableLock(ev){
   ev.preventDefault(); const f=ev.target, p1=f.p1.value, p2=f.p2.value;
@@ -290,6 +358,7 @@ async function enableLock(ev){
   const raw=rnd(32), salt=rnd(16), w=await aesEnc(await pwKey(p1,salt), raw);
   LOCK={v:1, pw:{salt:b64e(salt), iv:w.iv, ct:w.ct}, autoMin:10};
   DKraw=raw; DK=await importAes(raw);
+  try { await reEncryptDocs(true); } catch(e){ console.error(e); }
   save(); await storeChain; render();
   alert('🔒 Kilit açıldı ve verilerin şifrelendi.'+(BIO_OK?'\nİstersen şimdi parmak izi / Windows Hello da ekleyebilirsin.':''));
 }
@@ -306,6 +375,7 @@ async function disableLock(){
   const pw=await askPassword('Kilidi kapatmak için parolanı gir:'); if(pw==null) return;
   try { await aesDec(await pwKey(pw,b64d(LOCK.pw.salt)),LOCK.pw); } catch(e){ alert('Parola yanlış.'); return; }
   if(!confirm('Kilit kapatılırsa veriler şifresiz saklanır ve program parola sormaz. Emin misin?')) return;
+  try { await reEncryptDocs(false); } catch(e){ console.error(e); }
   LOCK=null; DK=null; DKraw=null; save(); await storeChain; render();
 }
 async function enrollBio(){
@@ -481,6 +551,10 @@ function processRecurring(){
       p.lastPosted=m; n++; m=addMonths(m,f);
     }
   }
+  for(const i of S.insurances){
+    const L=i.installments||[];
+    L.forEach((x,k)=>{ if(!x.posted && x.date<=t){ addAuto(x.date,OINS_CAT,x.amount,i.currency||'TRY',`${i.type}: ${i.name} — taksit ${k+1}/${L.length}`,i.id); x.posted=true; n++; } });
+  }
   if(n){ save(); autoMsg='🔁 '+n+' otomatik ödeme gider olarak eklendi'; }
   return n;
 }
@@ -499,6 +573,7 @@ function autoLimit(c){
   if(c===DEBT_CAT) return S.assets.filter(a=>isInstDebt(a)&&num(a.left)>0).reduce((s,a)=>s+toTRY(a.inst,a.currency),0);
   if(c===BES_CAT) return S.bes.reduce((s,b)=>s+num(b.monthly),0);
   if(c===INS_CAT) return fixedPayments().filter(x=>x.kind==='Sigorta').reduce((s,x)=>s+x.amount,0);
+  if(c===OINS_CAT) return fixedPayments().filter(x=>x.kind==='GSigorta').reduce((s,x)=>s+x.amount,0);
   return 0;
 }
 function effLimit(c){ return S.budgets[c]>0 ? S.budgets[c] : autoLimit(c); }
@@ -514,6 +589,8 @@ function fixedPayments(){
     if((done || due) && !(p.end && dueDate(cur,p.day)>p.end))
       out.push({name:p.name, kind:'Sigorta', day:p.day, amount:toTRY(p.premium,p.currency), done, cur:p.currency, orig:num(p.premium)});
   }
+  for(const i of S.insurances){ const L=i.installments||[];
+    L.forEach((x,k)=>{ if(ym(x.date)===cur) out.push({name:i.name, kind:'GSigorta', day:+x.date.slice(8), amount:toTRY(x.amount,i.currency||'TRY'), done:!!x.posted, label:`${i.type} · taksit ${k+1}/${L.length}`}); }); }
   return out.sort((x,y)=>num(x.day)-num(y.day));
 }
 
@@ -521,9 +598,9 @@ function cats(type){ return [...(type==='gelir'?S.settings.incomeCats:S.settings
 
 // ---------- Görünüm ----------
 let swReg=null, installEvt=null;
-let tab='ozet', filterMonth=ym(today()), editId=null, editAsset=null, editBes=null, editPol=null, editStock=null;
-const VIEWS = {ozet:vOzet, islem:vIslem, butce:vButce, varlik:vVarlik, hisse:vHisse, bes:vBes, sigorta:vSigorta, hedef:vHedef, emekli:vEmekli, ayar:vAyar};
-function show(t){ tab=t; editId=null; editAsset=null; editBes=null; editPol=null; editStock=null; render(); window.scrollTo(0,0); }
+let tab='ozet', filterMonth=ym(today()), editId=null, editAsset=null, editBes=null, editPol=null, editStock=null, editIns=null, renewFrom=null;
+const VIEWS = {ozet:vOzet, islem:vIslem, butce:vButce, varlik:vVarlik, hisse:vHisse, bes:vBes, sigorta:vSigorta, gsig:vGsig, hedef:vHedef, emekli:vEmekli, ayar:vAyar};
+function show(t){ tab=t; editId=null; editAsset=null; editBes=null; editPol=null; editStock=null; editIns=null; renewFrom=null; render(); window.scrollTo(0,0); }
 function render(){
   if(!S) return;
   const lb=document.getElementById('lockBtn'); if(lb) lb.style.display=LOCK?'':'none';
@@ -599,12 +676,13 @@ function upcomingPayments(nDays){
   S.assets.forEach(a=>{ if(isInstDebt(a) && num(a.left)>0) add(a.name+' taksiti',a.lastPosted,1,a.day,toTRY(a.inst,a.currency)); });
   S.bes.forEach(b=>{ if(num(b.monthly)>0) add(b.name+' BES katkısı',b.lastPosted,1,b.day,num(b.monthly)); });
   S.policies.forEach(p=>{ if(num(p.premium)>0) add(p.name+' sigorta primi',p.lastPosted,num(p.freq)||1,p.day,toTRY(p.premium,p.currency),p.end); });
+  S.insurances.forEach(i=>(i.installments||[]).forEach((x,k)=>{ if(x.posted) return; const d=daysBetween(t,x.date); if(d>=0 && d<=nDays) out.push({name:`${i.type} sigortası (${i.name}) taksit ${k+1}`,date:x.date,days:d,amount:toTRY(x.amount,i.currency||'TRY')}); }));
   return out.sort((x,y)=>x.days-y.days);
 }
 function computeAlerts(){
   const out=[], t=today(), m=ym(t), tt=monthTotals(m), day=+t.slice(8), dim=new Date(+t.slice(0,4),+t.slice(5,7),0).getDate(), frac=day/dim;
   const avg={}; lastMonths(4).slice(0,3).forEach(pm=>{ const x=monthTotals(pm).byCat; for(const k in x) avg[k]=(avg[k]||0)+x[k]/3; });
-  const fixedCats=[DEBT_CAT,BES_CAT,INS_CAT];
+  const fixedCats=[DEBT_CAT,BES_CAT,INS_CAT,OINS_CAT];
   for(const c of S.settings.expenseCats){
     const lim=effLimit(c), sp=tt.byCat[c]||0, r=lim>0?sp/lim:0;
     if(lim>0 && !fixedCats.includes(c)){
@@ -620,6 +698,13 @@ function computeAlerts(){
   else if(tt.inc>0 && tt.exp>=tt.inc*0.9) out.push({lv:'amber',tx:`Bu ay harcamaların gelirinin %${nf.format(tt.exp/tt.inc*100)} seviyesinde (gelir ${money(tt.inc)}, gider ${money(tt.exp)})`});
   for(const x of S.stocks) if(num(x.price)>0 && num(x.target)>0 && num(x.price)<=num(x.target))
     out.push({lv:'green',tx:`${x.symbol} hedef alım fiyatının altında: ${money2(num(x.price),x.currency)} (hedef ${money2(num(x.target),x.currency)})`});
+  for(const i of S.insurances){
+    if(!i.end) continue; const k=daysBetween(t,i.end);
+    const renewed=S.insurances.some(o=>o!==i && o.type===i.type && normKey(o.name)===normKey(i.name) && o.start && daysBetween(i.end,o.start)>=-20);
+    if(renewed) continue;
+    if(k>=0 && k<=30) out.push({lv:'amber',tx:`${i.type} sigortası "${i.name}" ${fmtDate(i.end)} tarihinde bitiyor (${k} gün). Yenilemeyi unutma.`});
+    else if(k<0 && k>=-60) out.push({lv:'red',tx:`${i.type} sigortası "${i.name}" ${fmtDate(i.end)} tarihinde bitti; yenilenmediyse teminatın yok.`});
+  }
   for(const x of upcomingPayments(7)) out.push({lv:'info',tx:`${x.days===0?'Bugün':x.days===1?'Yarın':x.days+' gün sonra'} (${fmtDate(x.date)}): ${x.name} ${money(x.amount)}`});
   const ord={red:0,amber:1,green:2,info:3};
   return out.sort((a,b)=>ord[a.lv]-ord[b.lv]);
@@ -652,6 +737,7 @@ function buildReport(){
     L.push(`Toplam yıllık temettü (brüt): ${money(w.div)}`); }
   if(S.bes.length){ L.push('', '## BES'); S.bes.forEach(b=>{ const v=besVest(b); L.push(`- ${b.name}: kendi ${money(besOwn(b))}, devlet ${money(besState(b))}${(b.funds||[]).length?' (fonlar: '+b.funds.map(f=>`${f.code} ${f.acct==='state'?'devlet':'kendi'} ${money(fundVal(f))}`).join(', ')+')':''}, aylık katkı ${money(num(b.monthly))}, sistemde ${nf2.format(v.yrs)} yıl, hak ediş %${v.pct}`); }); }
   if(S.policies.length){ L.push('', '## Birikimli hayat sigortaları'); S.policies.forEach(p=>L.push(`- ${p.name} (${p.company||'-'}, sigortalı ${p.insured}): birikim ${money(num(p.value),p.currency)}, teminat ${money(num(p.coverage),p.currency)}, prim ${money(num(p.premium),p.currency)} / ${FREQS.find(f=>f[0]===(num(p.freq)||1))[1].toLowerCase()}, başlangıç ${fmtDate(p.start)}, vade ${p.end?fmtDate(p.end):'-'}`)); }
+  if(S.insurances.length){ L.push('', '## Diğer sigortalar (sağlık, DASK, konut...)'); S.insurances.forEach(i=>L.push(`- ${i.type} – ${i.name} (${i.company||'-'}): ${fmtDate(i.start)} – ${fmtDate(i.end)}, toplam prim ${money(num(i.total),i.currency||'TRY')}, ${(i.installments||[]).length} taksit`)); }
   if(S.goals.length){ L.push('', '## Hedefler'); S.goals.forEach(g=>L.push(`- ${g.name}: ${money(g.saved,g.currency)} / ${money(g.target,g.currency)}${g.date?', hedef tarih '+fmtDate(g.date):''}`)); }
   const R=S.retirement, rn=retNumbers();
   L.push('', '## Emeklilik planı (bugünkü euro ile, reel getiri)', `Yaş ${R.age}, emeklilik yaşı ${R.retireAge}, plan yaşı ${R.lifeTo}; emeklilikte aylık ihtiyaç ${money(R.monthlyNeed,'EUR')}; tek seferlik harcama ${money(R.lump,'EUR')}`,
@@ -735,7 +821,7 @@ function vButce(){
     const tot=fp.reduce((s,x)=>s+x.amount,0);
     h+=`<div class="card"><h3>🔁 Bu ayın sabit ödemeleri</h3>
       <p class="note">Borç taksitleri, BES katkıları ve sigorta primleri, ödeme günü gelince otomatik olarak gider kaydedilir. Bunları ayrıca girmene gerek yok.</p>
-      <div class="scroll"><table>`+fp.map(x=>`<tr><td>${esc(x.name)}</td><td class="note">${x.kind==='Taksit'?'Taksit · kalan '+nf.format(x.left):x.kind==='BES'?'BES katkısı':'Hayat sigortası primi'+(x.cur&&x.cur!=='TRY'?' · '+money(x.orig,x.cur):'')}</td><td>Ayın ${num(x.day)||1}'i</td>
+      <div class="scroll"><table>`+fp.map(x=>`<tr><td>${esc(x.name)}</td><td class="note">${x.kind==='GSigorta'?esc(x.label):x.kind==='Taksit'?'Taksit · kalan '+nf.format(x.left):x.kind==='BES'?'BES katkısı':'Hayat sigortası primi'+(x.cur&&x.cur!=='TRY'?' · '+money(x.orig,x.cur):'')}</td><td>Ayın ${num(x.day)||1}'i</td>
         <td class="num">${money(x.amount)}</td><td>${x.done?'<span class="pos">✔ Gider eklendi</span>':'<span class="note">⏳ Bekliyor</span>'}</td></tr>`).join('')+
       `<tr class="total"><td colspan="3">Toplam</td><td class="num">${money(tot)}</td><td></td></tr></table></div></div>`;
   }
@@ -1236,7 +1322,8 @@ function vSigorta(){
     <form class="row" onsubmit="addPol(event)">
       <label>Poliçe adı<input name="name" required value="${esc(e?e.name:'')}" placeholder="ör. Eşim birikimli hayat"></label>
       <label>Sigorta şirketi<input name="company" value="${esc(e?e.company:'')}"></label>
-      <label>Sigortalı<select name="insured">${opts(people,e?e.insured:people[0])}</select></label>
+      <label>Poliçe no<input name="policyNo" value="${esc(e?e.policyNo||'':'')}" style="width:130px"></label>
+      <label>Sigortalı<select name="insured">${opts(people.includes(e&&e.insured)||!e?people:[e.insured,...people],e?e.insured:people[0])}</select></label>
       <label>Para birimi<select name="currency">${optsKV(CURS,e?e.currency:'TRY')}</select></label>
       <label>Prim tutarı<input type="number" name="premium" step="any" min="0" required value="${e?e.premium:''}" style="width:120px"></label>
       <label>Ödeme sıklığı<select name="freq">${optsKV(FREQS.map(([k,v])=>[String(k),v]),String(e?e.freq:1))}</select></label>
@@ -1249,7 +1336,8 @@ function vSigorta(){
       <button class="btn">${e?'Kaydet':'Ekle'}</button>
       ${e?'<button type="button" class="btn sec" onclick="editPol=null;render()">Vazgeç</button>':''}
     </form>
-    <p class="note">Tutarlar poliçenin para biriminde (TL, € veya $). Bilgileri poliçende ya da sigorta şirketinin uygulamasında bulabilirsin. Prim, ödeme günü gelince otomatik gider yazılır ve bütçede görünür. Birikim tutarı otomatik artmaz (şirket masraf ve getiri ekler); ara sıra şirketin uygulamasındaki güncel tutarı aşağıdan düzelt.</p></div>`;
+    <p class="note">Tutarlar poliçenin para biriminde (TL, € veya $). Bilgileri poliçende ya da sigorta şirketinin uygulamasında bulabilirsin. Prim, ödeme günü gelince otomatik gider yazılır ve bütçede görünür. Birikim tutarı otomatik artmaz (şirket masraf ve getiri ekler); ara sıra şirketin uygulamasındaki güncel tutarı aşağıdan düzelt.</p>
+    ${importInsBtn()}</div>`;
   if(!S.policies.length) return h+`<p class="note">Henüz poliçe eklenmedi.</p>`;
   let val=0, cov=0, mon=0;
   S.policies.forEach(p=>{ val+=toTRY(p.value,p.currency); cov+=toTRY(p.coverage,p.currency); if(!(p.end && p.end<today())) mon+=toTRY(p.premium,p.currency)/(num(p.freq)||1); });
@@ -1259,7 +1347,7 @@ function vSigorta(){
     const left=p.end?monthsBetween(today(),p.end):null, ended=p.end && p.end<today();
     const next=ended?'':fmtDate(dueDate(addMonths(p.lastPosted||ym(today()),f),p.day));
     return `<div class="card"><h3>${esc(p.name)}</h3>
-      <p class="note">${esc(p.company||'')}${p.company?' · ':''}Sigortalı: ${esc(p.insured)}</p>
+      <p class="note">${esc(p.company||'')}${p.company?' · ':''}${p.policyNo?'Poliçe '+esc(p.policyNo)+' · ':''}Sigortalı: ${esc(p.insured)}</p>
       <table>
         <tr><td>Güncel birikim</td><td class="num"><b>${money(num(p.value),cur)}</b>${cur!=='TRY'&&rate(cur)?`<div class="note">${money(toTRY(p.value,cur))}</div>`:''}</td></tr>
         <tr><td>Vefat teminatı</td><td class="num">${money(num(p.coverage),cur)}</td></tr>
@@ -1270,13 +1358,14 @@ function vSigorta(){
         ${next?`<tr><td>Sonraki prim</td><td class="num">${next}</td></tr>`:''}
       </table>
       <div class="row" style="margin-top:8px"><label>Güncel birikimi düzelt<input type="number" step="any" min="0" value="${num(p.value)}" style="width:130px" onchange="setPol('${p.id}',this.value)"></label>
-      <button class="link" onclick="editPolFn('${p.id}')">düzenle</button><button class="link del" onclick="delPol('${p.id}')">sil</button></div></div>`;
+      <button class="link" onclick="editPolFn('${p.id}')">düzenle</button><button class="link del" onclick="delPol('${p.id}')">sil</button></div>
+      ${docsHtml('pol',p)}</div>`;
   }).join('')+`</div>`;
   return h;
 }
 function addPol(ev){
   ev.preventDefault(); const f=ev.target, old=editPol?S.policies.find(x=>x.id===editPol):null;
-  const p={id:editPol||uid(), name:f.name.value.trim(), company:f.company.value.trim(), insured:f.insured.value, currency:f.currency.value,
+  const p={...(old||{}), id:editPol||uid(), name:f.name.value.trim(), company:f.company.value.trim(), policyNo:f.policyNo.value.trim(), insured:f.insured.value, currency:f.currency.value,
            premium:num(f.premium.value), freq:+f.freq.value, day:Math.min(31,Math.max(1,Math.round(num(f.day.value))||1)),
            start:f.start.value, end:f.end.value, value:num(f.value.value), coverage:num(f.coverage.value), expected:num(f.expected.value), lastPosted:''};
   if(p.end && p.end<=p.start){ alert('Vade sonu başlangıçtan sonra olmalı.'); return; }
@@ -1287,7 +1376,137 @@ function addPol(ev){
 }
 function setPol(id,v){ const p=S.policies.find(x=>x.id===id); if(p){ p.value=num(v); save(); render(); } }
 function editPolFn(id){ editPol=id; render(); window.scrollTo(0,0); }
-function delPol(id){ if(!confirm('Bu poliçe silinsin mi? (Geçmiş prim giderleri silinmez.)')) return; S.policies=S.policies.filter(p=>p.id!==id); save(); render(); }
+function delPol(id){ if(!confirm('Bu poliçe silinsin mi? (Geçmiş prim giderleri silinmez; ekli belgeler silinir.)')) return; delDocsOf(S.policies.find(p=>p.id===id)); S.policies=S.policies.filter(p=>p.id!==id); save(); render(); }
+
+// ---- Diğer (gider) sigortalar: sağlık, DASK, konut, kasko...
+function makeInstallments(total,count,first){
+  const n=Math.max(1,Math.round(num(count))||1), each=Math.round(num(total)/n*100)/100, out=[];
+  for(let k=0;k<n;k++){ const m=addMonths(ym(first),k); out.push({date:dueDate(m,+first.slice(8)), amount:k===n-1?Math.round((num(total)-each*(n-1))*100)/100:each, posted:false}); }
+  return out;
+}
+// Geçmiş aylardaki taksitler gider tablosuna yazılmaz; bu ay ve sonrası otomatik yazılır
+function markHistory(i){ const cm=ym(today()); (i.installments||[]).forEach(x=>{ if(ym(x.date)<cm && !x.posted){ x.posted=true; x.hist=true; } }); }
+function addYears(d,k){ if(!d) return ''; const [y,m,dd]=d.split('-'); return (+y+k)+'-'+m+'-'+(m==='02'&&dd==='29'?'28':dd); }
+function importInsBtn(){
+  return `<div class="row" style="margin-top:8px"><label class="btn sec" style="flex-direction:row;cursor:pointer;color:var(--accent);font-size:15px;background:var(--accent2);padding:8px 14px;border-radius:7px">📄 Claude'un hazırladığı sigorta dosyasını içe aktar<input type="file" accept=".json,application/json" style="display:none" onchange="importIns(this)"></label></div>`;
+}
+function insForecast(){
+  const ms=[]; let m=ym(today()); for(let k=0;k<12;k++){ ms.push(m); m=addMonths(m,1); }
+  const life={}, oth={}; ms.forEach(x=>{ life[x]=0; oth[x]=0; });
+  for(const i of S.insurances) for(const x of i.installments||[]) if(oth[ym(x.date)]!=null) oth[ym(x.date)]+=toTRY(x.amount,i.currency||'TRY');
+  for(const p of S.policies){
+    if(!(num(p.premium)>0) || !p.lastPosted) continue;
+    const f=num(p.freq)||1; let d=p.lastPosted===ms[0]?p.lastPosted:addMonths(p.lastPosted,f), g=0;
+    while(d<=ms[11] && g++<200){ if(p.end && dueDate(d,p.day)>p.end) break; if(life[d]!=null) life[d]+=toTRY(p.premium,p.currency); d=addMonths(d,f); }
+  }
+  return ms.map(x=>({m:x, life:life[x], oth:oth[x]}));
+}
+function forecastChart(rows){
+  const max=Math.max(1,...rows.map(r=>r.life+r.oth)), W=600, H=160, bw=W/rows.length;
+  let svg=`<svg viewBox="0 -16 ${W} ${H+52}" width="100%" role="img" aria-label="12 aylık sigorta ödemeleri">`;
+  rows.forEach((r,i)=>{ const x=i*bw, h1=r.oth/max*H, h2=r.life/max*H, tot=r.oth+r.life;
+    svg+=`<rect x="${(x+bw*0.18).toFixed(1)}" y="${(H-h1).toFixed(1)}" width="${(bw*0.64).toFixed(1)}" height="${h1.toFixed(1)}" fill="#2f6db5" rx="2"><title>${mLabel(r.m)} diğer sigortalar: ${money(r.oth)}</title></rect>`;
+    svg+=`<rect x="${(x+bw*0.18).toFixed(1)}" y="${(H-h1-h2).toFixed(1)}" width="${(bw*0.64).toFixed(1)}" height="${h2.toFixed(1)}" fill="#1f8a70" rx="2"><title>${mLabel(r.m)} hayat sigortaları: ${money(r.life)}</title></rect>`;
+    if(tot>0) svg+=`<text x="${(x+bw/2).toFixed(1)}" y="${(H-h1-h2-4).toFixed(1)}" text-anchor="middle" font-size="10" fill="#1d2433">${tot>=1e4?nf.format(tot/1e3)+' B':nf.format(tot)}</text>`;
+    svg+=`<text x="${(x+bw/2).toFixed(1)}" y="${H+18}" text-anchor="middle" font-size="11" fill="#6b7385">${mLabel(r.m)}</text>`; });
+  return svg+`</svg><div class="note"><span style="color:#2f6db5">■</span> Sağlık, DASK, konut vb. &nbsp; <span style="color:#1f8a70">■</span> Birikimli hayat sigortaları</div>`;
+}
+function vGsig(){
+  const e=editIns?S.insurances.find(x=>x.id===editIns):renewFrom, people=[...S.settings.members,'Ev','Araç','Diğer'];
+  const first=e&&e.installments&&e.installments[0]?e.installments[0].date:'';
+  const f0=renewFrom?{...renewFrom, start:renewFrom.end, end:addYears(renewFrom.end,1), first:addYears(first,1)}:e?{...e,first}:null;
+  let h=`<h2>🏥 Diğer Sigortalar</h2><p class="note" style="margin-top:-8px">Sağlık, DASK, konut, kasko gibi birikimi olmayan sigortalar. Taksitler vadesi gelince otomatik gider yazılır; bitiş tarihi yaklaşınca yenileme uyarısı çıkar.</p>`+ratesWarn();
+  h+=`<div class="card"><h3>${editIns?'Poliçeyi düzenle':renewFrom?'Poliçeyi yenile':'Poliçe ekle'}</h3>
+    <form class="row" onsubmit="addIns(event)">
+      <label>Tür<select name="type">${opts(OINS_TYPES,f0?f0.type:'Sağlık')}</select></label>
+      <label>Ad<input name="name" required value="${esc(f0?f0.name:'')}" placeholder="ör. Aile sağlık, Ev DASK" style="width:170px"></label>
+      <label>Şirket<input name="company" value="${esc(f0?f0.company||'':'')}" style="width:140px"></label>
+      <label>Poliçe no<input name="policyNo" value="${esc(f0&&!renewFrom?f0.policyNo||'':'')}" style="width:120px"></label>
+      <label>Sigortalı / kapsam<input name="insured" value="${esc(f0?f0.insured||'':'')}" placeholder="kişi ya da ev/araç" style="width:150px"></label>
+      <label>Başlangıç<input type="date" name="start" required value="${f0?f0.start||'':''}"></label>
+      <label>Bitiş (yenileme)<input type="date" name="end" required value="${f0?f0.end||'':''}"></label>
+      <label>Para birimi<select name="currency">${optsKV(CURS,f0?f0.currency||'TRY':'TRY')}</select></label>
+      <label>Toplam prim<input type="number" name="total" step="any" min="0" required value="${f0?f0.total||'':''}" style="width:120px"></label>
+      <label>Taksit sayısı<input type="number" name="count" step="1" min="1" max="24" value="${f0&&f0.installments?f0.installments.length:1}" style="width:90px"></label>
+      <label>İlk taksit tarihi<input type="date" name="first" value="${f0?f0.first||f0.start||'':''}"></label>
+      <button class="btn">${editIns?'Kaydet':renewFrom?'Yenilenmiş poliçeyi ekle':'Ekle'}</button>
+      ${editIns||renewFrom?'<button type="button" class="btn sec" onclick="editIns=null;renewFrom=null;render()">Vazgeç</button>':''}
+    </form>
+    <p class="note">Taksitler toplam primin eşit bölünmesiyle, ilk taksitten itibaren her ay oluşturulur. Tutarı farklı olan taksiti aşağıdaki tablodan düzeltebilirsin.${renewFrom?' <b>Yenilemede yeni toplam primi poliçeden kontrol et.</b>':''}</p>
+    ${importInsBtn()}</div>`;
+  const fc=insForecast(), tot12=fc.reduce((s,r)=>s+r.life+r.oth,0), cur=fc[0];
+  const active=S.insurances.filter(i=>!i.end || i.end>=today());
+  const yearly=active.reduce((s,i)=>s+toTRY(i.total,i.currency||'TRY'),0);
+  h+=`<div class="grid">${stat('Bu ay sigorta ödemeleri',money(cur.life+cur.oth)+`<div class="note">Diğer: ${money(cur.oth)} · Hayat: ${money(cur.life)}</div>`)}${stat('Önümüzdeki 12 ay',money(tot12)+`<div class="note">Aylık ortalama ${money(tot12/12)}</div>`)}${stat('Yürürlükteki poliçeler (yıllık prim)',money(yearly)+`<div class="note">${active.length} poliçe</div>`)}</div>`;
+  h+=`<div class="card" style="margin-top:16px"><h3>📅 Önümüzdeki 12 ayın sigorta ödemeleri</h3>${forecastChart(fc)}
+    <p class="note">Sadece bilinen taksitler gösterilir. Bir poliçe yenilenince yeni taksitleri eklenir ve grafik güncellenir.</p></div>`;
+  if(!S.insurances.length) return h+`<p class="note">Henüz poliçe eklenmedi.</p>`;
+  const list=S.insurances.slice().sort((a,b)=>(OINS_TYPES.indexOf(a.type)-OINS_TYPES.indexOf(b.type))||String(a.end).localeCompare(String(b.end)));
+  h+=list.map(i=>{
+    const L=i.installments||[], k=i.end?daysBetween(today(),i.end):null, ended=i.end && i.end<today();
+    const paid=L.filter(x=>x.posted || x.date<=today()).reduce((s,x)=>s+num(x.amount),0);
+    return `<div class="card" style="margin-top:16px"><div class="row" style="justify-content:space-between;align-items:center">
+      <h3 style="margin:0"><span style="background:#eef3fb;color:#24456e;border-radius:6px;padding:2px 8px;font-size:13px;margin-right:6px">${esc(i.type)}</span>${esc(i.name)}</h3>
+      <div><button class="link" onclick="editInsFn('${i.id}')">düzenle</button><button class="link" onclick="renewInsFn('${i.id}')">🔁 yenile</button><button class="link del" onclick="delIns('${i.id}')">sil</button></div></div>
+      <p class="note">${[i.company, i.policyNo?'Poliçe '+i.policyNo:'', i.insured?'Kapsam: '+i.insured:''].filter(Boolean).map(esc).join(' · ')}</p>
+      <p>Dönem: <b>${fmtDate(i.start)} – ${fmtDate(i.end)}</b> ${ended?'<span class="neg">· süresi doldu</span>':k!=null&&k<=30?`<span style="color:var(--amber)">· ${k} gün sonra yenileme</span>`:k!=null?`<span class="note">· ${k} gün kaldı</span>`:''}
+        · Toplam prim <b>${money(num(i.total),i.currency||'TRY')}</b> · ödenen ${money(paid,i.currency||'TRY')}</p>
+      <div class="scroll"><table><tr><th>Taksit</th><th>Tarih</th><th class="num">Tutar</th><th>Durum</th></tr>`+
+      L.map((x,j)=>`<tr><td>${j+1}/${L.length}</td><td>${fmtDate(x.date)}</td><td class="num"><input type="number" step="any" min="0" value="${num(x.amount)}" style="width:110px" onchange="setInst('${i.id}',${j},this.value)"></td>
+        <td>${x.hist?'<span class="note">Geçmiş ay (gider tablosuna yazılmadı)</span>':x.posted?'<span class="pos">✔ Gider yazıldı</span>':'<span class="note">⏳ Bekliyor</span>'}</td></tr>`).join('')+`</table></div>
+      ${docsHtml('ins',i)}</div>`;
+  }).join('');
+  return h;
+}
+function addIns(ev){
+  ev.preventDefault(); const f=ev.target, old=editIns?S.insurances.find(x=>x.id===editIns):null;
+  if(f.end.value<=f.start.value){ alert('Bitiş tarihi başlangıçtan sonra olmalı.'); return; }
+  const first=f.first.value||f.start.value;
+  const i={...(old||{}), id:old?old.id:uid(), type:f.type.value, name:f.name.value.trim(), company:f.company.value.trim(), policyNo:f.policyNo.value.trim(),
+           insured:f.insured.value.trim(), start:f.start.value, end:f.end.value, currency:f.currency.value, total:num(f.total.value), docs:old?old.docs||[]:[]};
+  const oldL=old?old.installments||[]:[], same=old && num(old.total)===i.total && oldL.length===Math.round(num(f.count.value)) && oldL[0] && oldL[0].date===first;
+  if(same) i.installments=oldL;
+  else { i.installments=makeInstallments(i.total,f.count.value,first); markHistory(i);
+         const postedDates=new Set(oldL.filter(x=>x.posted).map(x=>x.date)); i.installments.forEach(x=>{ if(postedDates.has(x.date)) x.posted=true; }); }
+  if(old) S.insurances[S.insurances.indexOf(old)]=i; else S.insurances.push(i);
+  ensureCat(OINS_CAT); editIns=null; renewFrom=null; processRecurring(); save(); render();
+}
+function setInst(id,j,v){ const i=S.insurances.find(x=>x.id===id); if(!i||!i.installments[j]) return; i.installments[j].amount=num(v); i.total=Math.round(i.installments.reduce((s,x)=>s+num(x.amount),0)*100)/100; save(); render(); }
+function editInsFn(id){ editIns=id; renewFrom=null; render(); window.scrollTo(0,0); }
+function renewInsFn(id){ const i=S.insurances.find(x=>x.id===id); if(!i) return; editIns=null; renewFrom=JSON.parse(JSON.stringify(i)); render(); window.scrollTo(0,0); }
+function delIns(id){ if(!confirm('Bu poliçe silinsin mi? (Geçmiş taksit giderleri silinmez; ekli belgeler silinir.)')) return; delDocsOf(S.insurances.find(x=>x.id===id)); S.insurances=S.insurances.filter(x=>x.id!==id); save(); render(); }
+// Claude'un poliçe PDF'lerinden hazırladığı dosya: hayat ve diğer sigortalar, PDF'ler dosyanın içinde
+async function importIns(inp){
+  const file=inp.files[0]; inp.value=''; if(!file) return;
+  let d; try { d=JSON.parse(await file.text()); } catch(e){ alert('Dosya okunamadı.'); return; }
+  if(!d || d.type!=='aile-finans-sigorta'){ alert('Bu dosya bir Aile Finans sigorta dosyası değil.'); return; }
+  const life=d.life||[], other=d.other||[], ndocs=[...life,...other].reduce((s,c)=>s+(c.docs||[]).length,0);
+  const lines=[...life.map(c=>`• Hayat: ${c.name}`), ...other.map(c=>`• ${c.type}: ${c.name} (${fmtDate(c.start)} – ${fmtDate(c.end)})`)];
+  if(!confirm(`Şu poliçeler içe aktarılacak (${ndocs} PDF ile):\n\n${lines.join('\n')}\n\nAynı poliçe programda varsa bilgileri güncellenir. Devam?`)) return;
+  const addDocs=async(o,docs)=>{ o.docs=o.docs||[]; for(const x of docs||[]){ if(o.docs.some(y=>y.name===x.name)) continue; const id=await storeDoc(x.name,x.type||'application/pdf',b64d(x.b64).buffer); o.docs.push({id,name:x.name,size:Math.round(x.b64.length*0.75),added:today()}); } };
+  let added=0, updated=0;
+  try {
+    for(const c of life){
+      let p=S.policies.find(x=>(c.policyNo && x.policyNo && normKey(x.policyNo)===normKey(c.policyNo)) || normKey(x.name)===normKey(c.name));
+      const fields={name:c.name, company:c.company||'', policyNo:c.policyNo||'', insured:c.insured||'', currency:c.currency||'TRY', premium:num(c.premium), freq:num(c.freq)||1,
+        day:num(c.day)||1, start:c.start||'', end:c.end||'', value:num(c.value), coverage:num(c.coverage), expected:num(c.expected)};
+      if(p){ Object.assign(p,fields); updated++; } else { p={id:uid(), ...fields, lastPosted:'', docs:[]}; S.policies.push(p); added++; }
+      if(c.lastPosted) p.lastPosted=c.lastPosted; else if(!p.lastPosted && p.premium>0) initPolicy(p,false);
+      ensureCat(INS_CAT); await addDocs(p,c.docs);
+    }
+    for(const c of other){
+      let i=S.insurances.find(x=>(c.policyNo && x.policyNo && normKey(x.policyNo)===normKey(c.policyNo) && x.start===c.start) || (x.type===c.type && normKey(x.name)===normKey(c.name) && x.start===c.start));
+      const L=(c.installments&&c.installments.length?c.installments.map(x=>({date:x.date, amount:num(x.amount), posted:false})):makeInstallments(c.total,c.count||1,c.first||c.start));
+      const fields={type:OINS_TYPES.includes(c.type)?c.type:'Diğer', name:c.name, company:c.company||'', policyNo:c.policyNo||'', insured:c.insured||'',
+        start:c.start, end:c.end, currency:c.currency||'TRY', total:c.total!=null?num(c.total):L.reduce((s,x)=>s+x.amount,0)};
+      if(i){ const posted=new Set((i.installments||[]).filter(x=>x.posted).map(x=>x.date)); Object.assign(i,fields); i.installments=L; L.forEach(x=>{ if(posted.has(x.date)) x.posted=true; }); updated++; }
+      else { i={id:uid(), ...fields, installments:L, docs:[]}; S.insurances.push(i); added++; }
+      markHistory(i); ensureCat(OINS_CAT); await addDocs(i,c.docs);
+    }
+  } catch(e){ alert('İçe aktarma sırasında hata: '+e.message); }
+  processRecurring(); save(); render();
+  alert(`✅ Sigortalar aktarıldı: ${added} yeni, ${updated} güncellenen poliçe.`);
+}
 
 // ---- Hedefler ----
 function vHedef(){
@@ -1406,7 +1625,7 @@ function vAyar(){
       <button class="btn sec" onclick="backup()">⬇️ Yedek indir</button>
       <label class="btn sec" style="flex-direction:row;cursor:pointer;color:var(--accent);font-size:15px;background:var(--accent2);padding:8px 14px;border-radius:7px">⬆️ Yedekten yükle<input type="file" accept=".json,application/json" style="display:none" onchange="restore(this)"></label>
       <button class="btn sec" onclick="exportCSV()">📑 İşlemleri Excel'e aktar (CSV)</button></div>
-    <p class="note">Son yedek: ${st.lastBackup?fmtDate(st.lastBackup):'hiç alınmadı'}</p></div>`;
+    <p class="note">Son yedek: ${st.lastBackup?fmtDate(st.lastBackup):'hiç alınmadı'}. Poliçe PDF'leri "Yedek indir" ile alınan yedeğe dahildir; otomatik kayıt dosyasına dahil değildir.</p></div>`;
   h+=`<div class="card"><h3>🔄 Program sürümü</h3><p>Sürüm <b>${APP_VERSION}</b></p>
     <div class="row"><button class="btn sec" onclick="checkUpdate()">Güncellemeleri kontrol et</button>
     ${installEvt?'<button class="btn" onclick="installApp()">💻 Bilgisayara uygulama olarak yükle</button>':''}</div>
@@ -1456,15 +1675,17 @@ function download(name,text,type){
 }
 async function backup(){
   S.settings.lastBackup=today(); save();
-  const text=await makeExport(JSON.stringify(S), LOCK?DK:null, LOCK);
+  const obj=JSON.parse(JSON.stringify(S)); obj.__docs=await collectDocs();   // PDF'ler de yedeğe dahil
+  const text=await makeExport(JSON.stringify(obj), LOCK?DK:null, LOCK);
   download('aile-finans-yedek-'+today()+(LOCK?'-sifreli':'')+'.json', text, 'application/json'); render();
 }
-function loadData(d){ S=merge(defaults(),d); editId=null; editAsset=null; editBes=null; editPol=null; processRecurring(); }
+function loadData(d){ delete d.__docs; S=merge(defaults(),d); editId=null; editAsset=null; editBes=null; editPol=null; editIns=null; renewFrom=null; processRecurring(); }
 function restore(inp){
   const f=inp.files[0]; inp.value=''; if(!f) return;
-  f.text().then(readExport).then(d=>{
+  f.text().then(readExport).then(async d=>{
     if(!confirm('Yedekteki veriler yüklenecek ve şu anki verilerin YERİNİ alacak. Devam edilsin mi?')) return;
-    loadData(d); save(); render(); alert('Yedek yüklendi.');
+    const docs=d.__docs; delete d.__docs;
+    loadData(d); if(docs) await restoreDocs(docs); save(); render(); alert('Yedek yüklendi.');
   }).catch(e=>alert('Yüklenemedi: '+e.message));
 }
 const FTYPES=[{description:'Aile Finans verisi',accept:{'application/json':['.json']}}];
@@ -1480,7 +1701,8 @@ async function openFile(){
     const [h] = await window.showOpenFilePicker({types:FTYPES});
     if(h.requestPermission){ const p=await h.requestPermission({mode:'readwrite'}); if(p!=='granted') throw new Error('Dosyaya yazma izni verilmedi.'); }
     const d = await readExport(await (await h.getFile()).text());
-    loadData(d); fileHandle=h; S.settings.lastBackup=today(); save(); render();
+    const docs=d.__docs; delete d.__docs;
+    loadData(d); if(docs) await restoreDocs(docs); fileHandle=h; S.settings.lastBackup=today(); save(); render();
   } catch(e){ if(e.name!=='AbortError') alert('Açılamadı: '+e.message); }
 }
 function exportCSV(){
