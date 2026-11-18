@@ -92,7 +92,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 'use strict';
 // ---------- Yardımcılar ----------
 const KEY = 'aileFinans_v1';
-const APP_VERSION = '1.8.2';
+const APP_VERSION = '1.8.3';
 const AYLAR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
 const CURS = [['TRY','TL'],['EUR','Euro'],['USD','Dolar']];
 const CURS_A = [...CURS, ['GAU','Gram altın']];
@@ -1192,8 +1192,8 @@ async function importBes(inp){
   if(!confirm('Şu BES bilgileri içe aktarılacak:\n\n'+lines.join('\n')+'\n\nAynı sözleşme programda varsa fonları ve pay adetleri dosyadakiyle değiştirilir. Devam?')) return;
   let added=0, updated=0;
   for(const c of d.contracts){
-    const norm=x=>String(x||'').toLocaleLowerCase('tr').trim();
-    let b=S.bes.find(x=>(c.contractNo && x.contractNo && norm(x.contractNo)===norm(c.contractNo)) || norm(x.name)===norm(c.name));
+    const norm=x=>String(x||'').toLocaleLowerCase('tr').replace(/\s+/g,'');   // 'THE100518692' = 'THE 100518692'
+    let b=S.bes.find(x=>(c.contractNo && x.contractNo && norm(x.contractNo)===norm(c.contractNo)) || norm(x.name)===norm(c.name) || (c.contractNo && norm(x.name).includes(norm(c.contractNo))));
     const funds=(c.funds||[]).map(f=>{ const o={acct:f.acct==='state'?'state':'own', code:String(f.code||'').toUpperCase(), name:f.name||'', units:num(f.units), price:num(f.price), priceDate:f.priceDate||'', alloc:num(f.alloc)};
       if(f.amount!=null && !num(f.units)){ o.pendingAmount=num(f.amount); o.pendingDate=f.amountDate||''; }
       return o; });
