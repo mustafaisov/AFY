@@ -94,7 +94,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 'use strict';
 // ---------- Yardımcılar ----------
 const KEY = 'aileFinans_v1';
-const APP_VERSION = '1.10.0';
+const APP_VERSION = '1.11.0';
 const AYLAR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
 const CURS = [['TRY','TL'],['EUR','Euro'],['USD','Dolar']];
 const CURS_A = [...CURS, ['GAU','Gram altın']];
@@ -109,6 +109,7 @@ const DUE_KINDS = {
   'Motorlu Taşıtlar Vergisi': {sched:'mtv',     unit:'yıllık', hint:'GİB (Dijital Vergi Dairesi / e-Devlet) MTV ekranındaki YILLIK tutar. 2 eşit taksit: Ocak sonu ve Temmuz sonu.'},
   'Aidat':                    {sched:'monthly', unit:'aylık',  hint:'Site/apartman yönetiminin AYLIK aidatı ve ödeme günü.'},
   'Çevre temizlik vergisi':   {sched:'emlak',   unit:'yıllık', hint:'İş yerlerinde emlak vergisiyle birlikte, aynı tarihlerde 2 taksit. Konutta genelde su faturasıyla alınır.'},
+  'Gelir vergisi (kira)':     {sched:'beyan',   unit:'yıllık', hint:'Kira gelirinin yıllık beyannamesi Mart ayında verilir; vergi Mart sonu ve Temmuz sonunda 2 eşit taksitte ödenir. Tutar: beyannamede çıkan yıllık vergi (girilen yıl = ödeme yılı).'},
   'Diğer aylık':              {sched:'monthly', unit:'aylık',  hint:'Her ay aynı gün ödenen sabit gider.'},
   'Diğer yıllık':             {sched:'yearly',  unit:'yıllık', hint:'Yılda bir kez, aynı tarihte ödenen gider.'}
 };
@@ -147,7 +148,7 @@ function defaults(){
       members:['Ben','Eşim'],
       expenseCats:['Market','Faturalar','Kira/Aidat','Ulaşım/Araç','Eğitim','Sağlık','Giyim','Yeme-İçme','Eğlence','Tatil','Kredi/Borç ödemesi','Diğer'],
       incomeCats:['Maaş','Ticari gelir','Kira geliri','Temettü','Faiz','Diğer'],
-      rates:{EUR:0,USD:0,GAU:0,GBP:0}, avKey:'', ratesDate:'', ratesSourceDate:'', autoRates:true, lastBackup:''
+      rates:{EUR:0,USD:0,GAU:0,GBP:0}, avKey:'', dismissed:[], ratesDate:'', ratesSourceDate:'', autoRates:true, lastBackup:''
     },
     transactions:[], budgets:{}, assets:[], goals:[], bes:[], policies:[], stocks:[], insurances:[], dues:[],
     retirement:{age:48,retireAge:58,lifeTo:90,monthlyNeed:5000,current:0,monthly:0,realReturn:3.5,wr:3.5,lump:0}
@@ -619,9 +620,9 @@ function cats(type){ return [...(type==='gelir'?S.settings.incomeCats:S.settings
 
 // ---------- Görünüm ----------
 let swReg=null, installEvt=null;
-let tab='ozet', filterMonth=ym(today()), editId=null, editAsset=null, editBes=null, editPol=null, editStock=null, editIns=null, renewFrom=null, editDue=null;
+let tab='ozet', filterMonth=ym(today()), editId=null, editAsset=null, editBes=null, editPol=null, editStock=null, editIns=null, renewFrom=null, editDue=null, prefillDue=null;
 const VIEWS = {ozet:vOzet, islem:vIslem, butce:vButce, varlik:vVarlik, hisse:vHisse, bes:vBes, sigorta:vSigorta, gsig:vGsig, vergi:vVergi, hedef:vHedef, emekli:vEmekli, ayar:vAyar};
-function show(t){ tab=t; editId=null; editAsset=null; editBes=null; editPol=null; editStock=null; editIns=null; renewFrom=null; editDue=null; render(); window.scrollTo(0,0); }
+function show(t){ tab=t; editId=null; editAsset=null; editBes=null; editPol=null; editStock=null; editIns=null; renewFrom=null; editDue=null; prefillDue=null; render(); window.scrollTo(0,0); }
 function render(){
   if(!S) return;
   const lb=document.getElementById('lockBtn'); if(lb) lb.style.display=LOCK?'':'none';
@@ -671,7 +672,7 @@ function budgetRows(m){
 }
 function vOzet(){
   const m=ym(today()), t=monthTotals(m), w=worth(), eur=rate('EUR'), net=t.inc-t.exp;
-  let h=`<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:16px"><h2 style="margin:0">Özet — ${mLabel(m)}</h2><button class="btn" onclick="showReport()">🤖 Claude için rapor hazırla</button></div>`+ratesWarn()+backupWarn()+alertsCard();
+  let h=`<div class="row" style="justify-content:space-between;align-items:center;margin-bottom:16px"><h2 style="margin:0">Özet — ${mLabel(m)}</h2><button class="btn" onclick="showReport()">🤖 Claude için rapor hazırla</button></div>`+ratesWarn()+backupWarn()+alertsCard()+checksCard();
   if(!S.transactions.length && !S.assets.length){
     h+=`<div class="card"><h3>👋 Hoş geldin! Başlamak için:</h3><ol>
       <li>Euro, dolar ve altın kurları internetten otomatik gelir. Kontrol etmek için <a href="#" onclick="show('varlik');return false">Varlıklar</a> sekmesine bak.</li>
@@ -727,13 +728,82 @@ function computeAlerts(){
     if(k>=0 && k<=30) out.push({lv:'amber',tx:`${i.type} sigortası "${i.name}" ${fmtDate(i.end)} tarihinde bitiyor (${k} gün). Yenilemeyi unutma.`});
     else if(k<0 && k>=-60) out.push({lv:'red',tx:`${i.type} sigortası "${i.name}" ${fmtDate(i.end)} tarihinde bitti; yenilenmediyse teminatın yok.`});
   }
-  for(const d of S.dues){ if(!['emlak','mtv'].includes((DUE_KINDS[d.kind]||{}).sched)) continue;
+  for(const d of S.dues){ if(!['emlak','mtv','beyan'].includes((DUE_KINDS[d.kind]||{}).sched)) continue;
     for(const o of dueOccurrences(d,ym(t),addMonths(ym(t),1))){ const k=daysBetween(t,o.date);
       if(k>7 && k<=20) out.push({lv:'amber',tx:`${d.kind} (${d.name}) ${o.part||''} son ödeme günü ${fmtDate(o.date)} (${k} gün): ${money(o.amount)}${o.est?' (tahmini)':''}. Gecikirse gecikme zammı işler.`}); } }
   for(const x of upcomingPayments(7)) out.push({lv:'info',tx:`${x.days===0?'Bugün':x.days===1?'Yarın':x.days+' gün sonra'} (${fmtDate(x.date)}): ${x.name} ${money(x.amount)}`});
   const ord={red:0,amber:1,green:2,info:3};
   return out.sort((a,b)=>ord[a.lv]-ord[b.lv]);
 }
+// ---- Eksik kontrolü: verilerden çıkan ama girilmemiş olabilecek ödemeler
+const RENT_EXEMPT={2025:47000, 2026:58000, 2027:74141};   // konut kira geliri istisnası (2027: açıklanan tahmini tutar)
+function taxNonWage(m,year){   // ücret dışı gelirler tarifesi (2026); sonraki yıllar YDO ile büyütülerek tahmin
+  const f=year>2026?Math.pow(1.2783,year-2026):1, b=[190000,400000,1000000,5300000].map(x=>x*f);
+  if(m<=b[0]) return m*0.15; const t1=b[0]*0.15;
+  if(m<=b[1]) return t1+(m-b[0])*0.20; const t2=t1+(b[1]-b[0])*0.20;
+  if(m<=b[2]) return t2+(m-b[1])*0.27; const t3=t2+(b[2]-b[1])*0.27;
+  if(m<=b[3]) return t3+(m-b[2])*0.35; const t4=t3+(b[3]-b[2])*0.35;
+  return t4+(m-b[3])*0.40;
+}
+function rentInfo(y){
+  const tx=S.transactions.filter(t=>t.type==='gelir' && t.category==='Kira geliri' && t.date.slice(0,4)===String(y));
+  const sum=tx.reduce((s,t)=>s+toTRY(t.amount,t.currency),0); if(!sum) return null;
+  let proj=sum; const curY=new Date().getFullYear();
+  if(y===curY){   // yıl sonuna kadar son ayın kirasıyla devam edeceği varsayımı
+    const last=tx.map(t=>ym(t.date)).sort().pop(), lastAmt=tx.filter(t=>ym(t.date)===last).reduce((s,t)=>s+toTRY(t.amount,t.currency),0);
+    proj=sum+lastAmt*(12-(+last.slice(5)));
+  }
+  const ex=RENT_EXEMPT[y]||RENT_EXEMPT[2027], base=Math.max(0,proj-ex)*0.85;   // götürü gider %15
+  return {y, sum, proj, ex, tax:Math.round(taxNonWage(base,y)), over:proj>ex};
+}
+function linkedTo(items,asset,fields){ return items.some(o=>fields.some(f=>normKey(o[f]).includes(normKey(asset.name)) || (normKey(asset.name).length>3 && normKey(asset.name).includes(normKey(o[f]))))); }
+function computeChecks(){
+  const out=[], t=today(), y=+t.slice(0,4), day=+t.slice(8);
+  // 1) Kira geliri → gelir vergisi beyanı
+  for(const yy of (+t.slice(5,7)<=3?[y-1,y]:[y])){
+    const r=rentInfo(yy); if(!r) continue;
+    const has=S.dues.some(d=>d.kind==='Gelir vergisi (kira)' && d.amounts && d.amounts[yy+1]!=null);
+    if(r.over && !has) out.push({key:'rent'+yy, tx:`${yy} kira gelirin ${money(r.sum)}${r.proj>r.sum?` (yıl sonu tahmini ${money(r.proj)})`:''}. Konut kira istisnası ${money(r.ex)}; aşıldığı için ${yy+1} Mart'ında beyanname verip vergiyi Mart ve Temmuz sonunda 2 taksitte ödemen gerekir. Kaba tahmini vergi: ${money(r.tax)} (sadece kira geliri, götürü gider varsayımıyla; başka gelirlerin varsa farklı olur — mali müşavirine danış).`,
+      act:[`addRentTax(${yy+1},${r.tax})`,'Vergi & Aidat\'a ekle']});
+    else if(!r.over && r.proj>r.ex*0.8) out.push({key:'rentnear'+yy, tx:`${yy} kira gelirin (${money(r.proj)} tahmini) konut istisnasına (${money(r.ex)}) yaklaşıyor. Aşarsa ${yy+1} Mart'ında beyanname gerekir.`});
+  }
+  if(S.settings.incomeCats.includes('İşyeri kira geliri') && S.transactions.some(t=>t.category==='İşyeri kira geliri' && t.date.slice(0,4)===String(y)))
+    out.push({key:'shoprent'+y, tx:`İşyeri kira gelirin var: kiracı şirketse %20 stopajı o keser. Yıllık brüt işyeri kirası 2026 için 400.000 TL'yi aşarsa ya da başka beyan edilecek gelirin varsa Mart'ta beyanname gerekir; kesilen stopaj vergiden düşülür.`});
+  // 2) Varlık → zorunlu vergi ve sigortalar
+  const homes=S.assets.filter(a=>a.type==='Gayrimenkul'), cars=S.assets.filter(a=>a.type==='Araç');
+  const em=S.dues.filter(d=>d.kind==='Emlak vergisi'), mtv=S.dues.filter(d=>d.kind==='Motorlu Taşıtlar Vergisi');
+  const dask=S.insurances.filter(i=>i.type==='DASK'), traf=S.insurances.filter(i=>i.type==='Trafik' && (!i.end||i.end>=t));
+  const check=(list,items,fields,key,txf,act)=>{ const miss=list.filter(a=>!linkedTo(items,a,fields)); const free=items.filter(o=>!list.some(a=>linkedTo([o],a,fields))).length;
+    miss.slice(free).forEach(a=>out.push({key:key+normKey(a.name), tx:txf(a), act:act&&act(a)})); };
+  check(homes,em,['asset','name'],'emlak',a=>`"${a.name}" için emlak vergisi kaydı yok. Ödemeler Mayıs ve Kasım sonunda; tutarı belediyenin borç sorgulama ekranında.`,a=>[`goAddDue('Emlak vergisi',${JSON.stringify(a.name).replace(/"/g,'&quot;')})`,'Ekle']);
+  check(homes,dask,['insured','name'],'dask',a=>`"${a.name}" için DASK (zorunlu deprem sigortası) kaydı yok. Konutsa DASK zorunlu; elektrik/su aboneliği ve tapu işlemlerinde istenir.`,a=>[`show('gsig')`,'Sigortalara git']);
+  check(cars,mtv,['asset','name'],'mtv',a=>`"${a.name}" için MTV kaydı yok. Ödemeler Ocak ve Temmuz sonunda; tutarı GİB / e-Devlet MTV ekranında.`,a=>[`goAddDue('Motorlu Taşıtlar Vergisi',${JSON.stringify(a.name).replace(/"/g,'&quot;')})`,'Ekle']);
+  check(cars,traf,['insured','name'],'trafik',a=>`"${a.name}" için yürürlükte zorunlu trafik sigortası kaydı yok. Trafik sigortası olmadan araç trafiğe çıkamaz; bitiş tarihini takip etmek için ekle.`,a=>[`show('gsig')`,'Sigortalara git']);
+  // 3) Aylık katkısı girilmemiş BES'ler
+  S.bes.filter(b=>!(num(b.monthly)>0)).forEach(b=>out.push({key:'besm'+b.id, tx:`"${b.name}" BES sözleşmesinin aylık katkısı girilmemiş; ödemeleri gidere ve bütçeye yansımıyor.`, act:[`show('bes')`,'BES\'e git']}));
+  // 4) Her ay olan ama bu ay girilmeyen giderler
+  if(day>=20){
+    const prev=lastMonths(4).slice(0,3).map(monthTotals), cur=monthTotals(ym(t)).byCat, fixed=[DEBT_CAT,BES_CAT,INS_CAT,OINS_CAT,DUE_CAT];
+    S.settings.expenseCats.filter(c=>!fixed.includes(c) && prev.every(p=>(p.byCat[c]||0)>0) && !(cur[c]>0))
+      .forEach(c=>out.push({key:'miss'+c+ym(t), tx:`"${c}" son 3 ayın her birinde vardı ama bu ay hiç girilmedi (ortalama ${money(prev.reduce((s,p)=>s+p.byCat[c],0)/3)}). Unuttuğun bir ödeme olabilir mi?`, act:[`show('islem')`,'Gider gir']}));
+  }
+  const dis=S.settings.dismissed||[];
+  return out.filter(c=>!dis.includes(c.key));
+}
+function checksCard(){
+  const cs=computeChecks(); if(!cs.length) return '';
+  return `<div class="card"><h3>🧩 Eksik olabilecek ödemeler (${cs.length})</h3>${cs.map(c=>`<div class="alert" style="background:#f3eefb;color:#4b2e83;display:flex;gap:10px;align-items:flex-start;justify-content:space-between"><span>🔎 ${esc(c.tx)}</span>
+    <span style="white-space:nowrap">${c.act?`<button class="btn sec" style="padding:4px 10px;font-size:13px" onclick="${c.act[0]}">${esc(c.act[1])}</button>`:''}<button class="link" title="Bu uyarıyı bir daha gösterme" onclick="dismissCheck('${esc(c.key)}')">yoksay</button></span></div>`).join('')}</div>`;
+}
+function dismissCheck(k){ S.settings.dismissed=[...(S.settings.dismissed||[]),k]; save(); render(); }
+function goAddDue(kind,name){ show('vergi'); prefillDue={kind,name,asset:name,inc:27.83,amounts:{}}; render(); window.scrollTo(0,0); }
+function addRentTax(payYear,tax){
+  let d=S.dues.find(x=>x.kind==='Gelir vergisi (kira)');
+  if(!d){ d={id:uid(), kind:'Gelir vergisi (kira)', name:'Kira geliri beyanı', asset:'', day:1, date:'', inc:27.83, amounts:{}, postedUntil:addMonths(ym(today()),-1)+'-31', docs:[]}; S.dues.push(d); }
+  d.amounts[payYear]=tax; ensureCat(DUE_CAT); processRecurring(); save(); render();
+  alert(`${payYear} için tahmini ${money(tax)} kira vergisi Vergi & Aidat'a eklendi (Mart ve Temmuz sonu, 2 taksit). Beyanname kesinleşince tutarı oradan düzelt.`);
+}
+
 function alertsCard(){
   const al=computeAlerts(); if(!al.length) return '';
   return `<div class="card"><h3>🚨 Uyarılar ve hatırlatmalar</h3>${al.map(a=>`<div class="alert ${a.lv}">${a.lv==='red'?'⛔ ':a.lv==='amber'?'⚠️ ':a.lv==='green'?'💡 ':'📅 '}${esc(a.tx)}</div>`).join('')}</div>`;
@@ -770,6 +840,7 @@ function buildReport(){
     `Bugünkü birikim ${money(R.current,'EUR')}, aylık birikim ${money(R.monthly,'EUR')}, reel getiri %${nf2.format(R.realReturn)}, çekim oranı %${nf2.format(R.wr)}`,
     `Gereken sermaye (güvenli) ${money(rn.need,'EUR')}; emeklilikte tahmini birikim ${money(rn.fv,'EUR')}`);
   const al=computeAlerts(); if(al.length){ L.push('', '## Programın uyarıları'); al.forEach(a=>L.push('- '+a.tx)); }
+  const ck=computeChecks(); if(ck.length){ L.push('', '## Eksik olabilecek ödemeler'); ck.forEach(c=>L.push('- '+c.tx)); }
   L.push('', '## Sorularım',
     '1. Harcamalarımda nerede tasarruf edebilirim? Somut önerilerin neler?',
     '2. Mevcut tasarruf ve yatırım temposuyla emeklilik hedefime ulaşabilir miyim? Neyi değiştirmeliyim?',
@@ -1423,6 +1494,7 @@ function dueOccurrences(d,fromM,toM){
     if(d.startMonth && m<d.startMonth) continue;
     if(d.endMonth && m>d.endMonth) continue;
     if(k.sched==='emlak' && (mo===5||mo===11)) out.push({date:m+'-'+pad2(lastDay(y,mo)), amount:amt/2, est, part:mo===5?'1. taksit':'2. taksit'});
+    else if(k.sched==='beyan' && (mo===3||mo===7)) out.push({date:m+'-'+pad2(lastDay(y,mo)), amount:amt/2, est, part:mo===3?'1. taksit':'2. taksit'});
     else if(k.sched==='mtv' && (mo===1||mo===7)) out.push({date:m+'-'+pad2(lastDay(y,mo)), amount:amt/2, est, part:mo===1?'1. taksit':'2. taksit'});
     else if(k.sched==='monthly') out.push({date:dueDate(m,d.day||1), amount:amt, est});
     else if(k.sched==='yearly' && mo===num(String(d.date||'').slice(5,7))) out.push({date:dueDate(m,+String(d.date).slice(8)||1), amount:amt, est});
@@ -1430,7 +1502,8 @@ function dueOccurrences(d,fromM,toM){
   return out;
 }
 function vVergi(){
-  const e=editDue?S.dues.find(x=>x.id===editDue):null, y=new Date().getFullYear(), kind=e?e.kind:'Emlak vergisi';
+  const pf=!editDue&&prefillDue?prefillDue:null;
+  const e=editDue?S.dues.find(x=>x.id===editDue):pf, y=new Date().getFullYear(), kind=e?e.kind:'Emlak vergisi';
   const assetNames=S.assets.filter(a=>['Gayrimenkul','Araç'].includes(a.type)).map(a=>a.name);
   let h=`<h2>🧾 Vergi & Aidat</h2>
   <div class="card"><h3>Nasıl çalışır?</h3>
@@ -1445,8 +1518,8 @@ function vVergi(){
       <label style="${DUE_KINDS[kind].sched==='monthly'?'':'display:none'}">Ödeme günü<input type="number" name="day" min="1" max="31" step="1" value="${e?e.day||1:1}" style="width:80px"></label>
       <label style="${DUE_KINDS[kind].sched==='yearly'?'':'display:none'}">Ödeme tarihi<input type="date" name="date" value="${e?e.date||'':''}"></label>
       <label>Tahmini yıllık artış %<input type="number" name="inc" step="any" min="0" value="${e?e.inc:27.83}" style="width:90px"></label>
-      <button class="btn">${e?'Kaydet':'Ekle'}</button>
-      ${e?'<button type="button" class="btn sec" onclick="editDue=null;render()">Vazgeç</button>':''}
+      <button class="btn">${editDue?'Kaydet':'Ekle'}</button>
+      ${e?'<button type="button" class="btn sec" onclick="editDue=null;prefillDue=null;render()">Vazgeç</button>':''}
     </form>
     <p class="note" id="dueHint">${esc(DUE_KINDS[kind].hint)}</p>
     <p class="note">Varsayılan artış %27,83: 2027 için açıklanan yeniden değerleme oranı. MTV'de Cumhurbaşkanı farklı oran belirleyebilir (2026'da %18,95 uygulanmıştı); emlak vergisi ve aidat artışı farklı olabilir. Kesin tutar açıklanınca kartın içinden o yılın tutarını gir.</p></div>`;
@@ -1474,7 +1547,7 @@ function addDue(ev){
            date:f.date.value, inc:num(f.inc.value), amounts:{...((old&&old.amounts)||{}), [y]:num(f.amount.value)}, docs:old?old.docs||[]:[]};
   if(!old) d.postedUntil=addMonths(ym(today()),-1)+'-31';   // bu ayın geçmiş ödemeleri de gider yazılsın
   if(old) S.dues[S.dues.indexOf(old)]=d; else S.dues.push(d);
-  ensureCat(DUE_CAT); editDue=null; processRecurring(); save(); render();
+  ensureCat(DUE_CAT); editDue=null; prefillDue=null; processRecurring(); save(); render();
 }
 function setDueAmount(id,y,v){ const d=S.dues.find(x=>x.id===id); if(!d) return; d.amounts=d.amounts||{}; if(v==='') delete d.amounts[y]; else d.amounts[y]=num(v); save(); render(); }
 function delDue(id){ if(!confirm('Bu kayıt silinsin mi? (Geçmiş giderler silinmez; ekli belgeler silinir.)')) return; delDocsOf(S.dues.find(x=>x.id===id)); S.dues=S.dues.filter(x=>x.id!==id); save(); render(); }
@@ -1778,6 +1851,7 @@ function vAyar(){
       <label>Gelir kategorileri (her satıra bir tane)<textarea name="inc">${esc(st.incomeCats.join('\n'))}</textarea></label>
     </div><p class="note">Bir kategoriyi silsen bile eski işlemlerdeki adı korunur.</p>
     <button class="btn">Kaydet</button></form></div>`;
+  if((st.dismissed||[]).length) h+=`<div class="card"><h3>Yoksayılan uyarılar</h3><p class="note">${st.dismissed.length} eksik kontrolü uyarısını yoksaydın.</p><button class="btn sec" onclick="S.settings.dismissed=[];save();render()">Hepsini yeniden göster</button></div>`;
   h+=`<div class="card"><h3>Tehlikeli bölge</h3><button class="btn danger" onclick="resetAll()">Tüm verileri sil</button>
     <p class="note">Silmeden önce mutlaka yedek indir.</p></div>`;
   return h;
