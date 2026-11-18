@@ -1,6 +1,6 @@
 // Aile Finans - çevrimdışı çalışma ve güncelleme
 // Yeni sürüm yayınlarken VERSION'ı ve index.html içindeki APP_VERSION'ı birlikte artırın.
-const VERSION = '1.11.0';
+const VERSION = '1.12.0';
 const CACHE = 'aile-finans-' + VERSION;
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 

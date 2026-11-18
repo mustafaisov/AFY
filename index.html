@@ -75,6 +75,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
   <button data-tab="ozet" onclick="show('ozet')">📊 Özet</button>
   <button data-tab="islem" onclick="show('islem')">💸 Gelir / Gider</button>
   <button data-tab="butce" onclick="show('butce')">🎯 Bütçe</button>
+  <button data-tab="plan" onclick="show('plan')">🧭 Nakit Planı</button>
   <button data-tab="varlik" onclick="show('varlik')">💰 Varlıklar</button>
   <button data-tab="hisse" onclick="show('hisse')">📈 Hisseler</button>
   <button data-tab="bes" onclick="show('bes')">🏦 BES</button>
@@ -94,7 +95,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 'use strict';
 // ---------- Yardımcılar ----------
 const KEY = 'aileFinans_v1';
-const APP_VERSION = '1.11.0';
+const APP_VERSION = '1.12.0';
 const AYLAR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
 const CURS = [['TRY','TL'],['EUR','Euro'],['USD','Dolar']];
 const CURS_A = [...CURS, ['GAU','Gram altın']];
@@ -150,7 +151,7 @@ function defaults(){
       incomeCats:['Maaş','Ticari gelir','Kira geliri','Temettü','Faiz','Diğer'],
       rates:{EUR:0,USD:0,GAU:0,GBP:0}, avKey:'', dismissed:[], ratesDate:'', ratesSourceDate:'', autoRates:true, lastBackup:''
     },
-    transactions:[], budgets:{}, assets:[], goals:[], bes:[], policies:[], stocks:[], insurances:[], dues:[],
+    transactions:[], budgets:{}, assets:[], goals:[], bes:[], policies:[], stocks:[], insurances:[], dues:[], plans:[],
     retirement:{age:48,retireAge:58,lifeTo:90,monthlyNeed:5000,current:0,monthly:0,realReturn:3.5,wr:3.5,lump:0}
   };
 }
@@ -621,7 +622,7 @@ function cats(type){ return [...(type==='gelir'?S.settings.incomeCats:S.settings
 // ---------- Görünüm ----------
 let swReg=null, installEvt=null;
 let tab='ozet', filterMonth=ym(today()), editId=null, editAsset=null, editBes=null, editPol=null, editStock=null, editIns=null, renewFrom=null, editDue=null, prefillDue=null;
-const VIEWS = {ozet:vOzet, islem:vIslem, butce:vButce, varlik:vVarlik, hisse:vHisse, bes:vBes, sigorta:vSigorta, gsig:vGsig, vergi:vVergi, hedef:vHedef, emekli:vEmekli, ayar:vAyar};
+const VIEWS = {ozet:vOzet, islem:vIslem, butce:vButce, plan:vPlan, varlik:vVarlik, hisse:vHisse, bes:vBes, sigorta:vSigorta, gsig:vGsig, vergi:vVergi, hedef:vHedef, emekli:vEmekli, ayar:vAyar};
 function show(t){ tab=t; editId=null; editAsset=null; editBes=null; editPol=null; editStock=null; editIns=null; renewFrom=null; editDue=null; prefillDue=null; render(); window.scrollTo(0,0); }
 function render(){
   if(!S) return;
@@ -1711,6 +1712,104 @@ async function importIns(inp){
   processRecurring(); save(); render();
   alert(`✅ Aktarıldı: ${added} yeni, ${updated} güncellenen kayıt.`);
 }
+
+// ---- Nakit Planı: eldeki ve her ay artan nakdin nereye gideceği ----
+// Kullanıcıya soru sorulmaz; her şey programdaki verilerden türetilir.
+const PB=[['hisseY','Yabancı hisse','#1f6f5c'],['hisseT','Türk hisse / fon','#5aa58b'],['altin','Altın','#c99a12'],['doviz','Döviz (USD/EUR)','#3b6ea8'],['tl','TL (para piyasası fonu / mevduat)','#8a8f98']];
+function planData(){
+  const R=S.retirement, yrs=Math.max(0,num(R.retireAge)-num(R.age)), why=[];
+  const mt=lastMonths(7).slice(0,6).map(monthTotals).filter(t=>t.inc>0||t.exp>0), n=mt.length;
+  const inc=n?mt.reduce((s,t)=>s+t.inc,0)/n:0, exp=n?mt.reduce((s,t)=>s+t.exp,0)/n:0;
+  const sd=n>1?Math.sqrt(mt.reduce((s,t)=>s+(t.inc-inc)**2,0)/(n-1)):0, cv=inc>0?sd/inc:0;
+  // Eldeki varlıklar
+  let cash=0, gold=0, fx=0, trEq=0, fEq=0;
+  for(const a of S.assets){ const v=assetTRY(a);
+    if(a.type==='Nakit/Banka'){ if(a.currency==='TRY') cash+=v; else fx+=v; }
+    else if(a.type==='Döviz') fx+=v; else if(a.type==='Altın') gold+=v;
+    else if(a.type==='Hisse/Fon'){ if(a.currency==='TRY') trEq+=v; else fEq+=v; } }
+  for(const x of S.stocks){ if(num(x.shares)>0){ const v=stockCalc(x).valTRY; if(x.currency==='TRY') trEq+=v; else fEq+=v; } }
+  // 1) Acil durum fonu: gelir ne kadar dalgalıysa o kadar büyük
+  const emM=cv>0.35?12:cv>0.2?9:6, emT=emM*exp;
+  why.push(`Son ${n} ayın ortalaması: gelir ${money(inc)}, gider ${money(exp)}. Gelirin aydan aya %${nf.format(cv*100)} oynuyor, bu yüzden acil durum fonu ${emM} aylık gider (${money(emT)}) olarak hesaplandı.`);
+  // 2) Önümüzdeki 6 ayın sıçrayan sabit ödemeleri (vergi, sigorta taksiti, vade sonu…)
+  const fc=fixedForecast(), tot=r=>FC_SERIES.reduce((s,[k])=>s+r[k],0), avg=fc.reduce((s,r)=>s+tot(r),0)/12;
+  const spikes=fc.slice(0,6).map(r=>({m:r.m,x:Math.max(0,tot(r)-avg)})).filter(r=>r.x>1), lumpy=spikes.reduce((s,r)=>s+r.x,0);
+  if(lumpy>0) why.push(`Önümüzdeki 6 ayda normalin üstünde ödeme olan aylar: ${spikes.map(r=>mLabel(r.m)+' (+'+money(r.x)+')').join(', ')}. Bu ${money(lumpy)} TL'de bekletilir.`);
+  // 3) 2 yıl içindeki hedefler: risk alınmaz, aylık birikim ayrılır
+  const goals=S.goals.map(g=>{ const rem=Math.max(0,num(g.target)-num(g.saved)), mo=g.date?monthsBetween(today(),g.date):0;
+    return {g, rem:toTRY(rem,g.currency), mo, short:g.date&&mo>0&&mo<=24, monthly:g.date&&mo>0?toTRY(rem/mo,g.currency):0}; }).filter(x=>x.rem>0);
+  const sg=goals.filter(x=>x.short), goalMon=sg.reduce((s,x)=>s+x.monthly,0), goalHeld=sg.reduce((s,x)=>s+toTRY(x.g.saved,x.g.currency),0);
+  if(sg.length) why.push(`2 yıl içindeki hedefler (${sg.map(x=>x.g.name).join(', ')}) için her ay ${money(goalMon)} ayrılır ve bu para riske girmez (hedefin para biriminde mevduat/fon).`);
+  // 4) Yatırılabilir tutar
+  const safety=emT+lumpy+goalHeld, excess=cash-safety, surplus=inc-exp;
+  const base=surplus-goalMon; let fill=0, lump=0, spread=1;
+  if(excess<0){ fill=Math.min(Math.max(0,base),-excess/6); why.push(`Vadesiz/TL nakdin (${money(cash)}) güvenlik ihtiyacının (${money(safety)}) ${money(-excess)} altında. Açık 6 ayda kapansın diye bu ay ${money(fill)} kenara ayrılıyor.`); }
+  else if(excess>0){ spread=excess>Math.max(3*base,1)?6:1; lump=excess/spread;
+    why.push(spread>1?`Güvenlik ihtiyacının üstünde ${money(excess)} boşta nakit var. Tek seferde değil, 6 aya bölünerek (ayda ${money(lump)}) yatırılır; böylece yanlış zamanda girme riski azalır.`:`Güvenlik ihtiyacının üstündeki ${money(excess)} bu ay yatırılabilir.`); }
+  const invest=Math.max(0,base-fill+lump), monthly=base;
+  // 5) Hedef dağılım: emekliliğe kalan süreden türetilir, yaklaştıkça temkinli
+  let eq=Math.min(75,Math.max(25,25+3.5*yrs)); if(cv>0.25) eq-=10; eq=Math.max(20,eq);
+  const fShare=(fEq+trEq)>0?Math.min(0.9,Math.max(0.5,fEq/(fEq+trEq))):0.7, rest=100-eq;
+  const target={hisseY:eq*fShare, hisseT:eq*(1-fShare), altin:rest*0.35, doviz:rest*0.35, tl:rest*0.30};
+  why.push(`Emekliliğe ${yrs} yıl var (Emeklilik sekmesindeki yaşlara göre). Uzun vadeli paranın %${Math.round(eq)}'i hisseye ayrılır; her yıl yaklaşık 3,5 puan azalır. Türkiye'deki yüksek enflasyon nedeniyle geri kalanın çoğu altın ve dövizde, küçük bir kısmı TL fonda tutulur.${(fEq+trEq)>0?` Hissedeki yabancı/Türk oranı mevcut portföyünden alındı.`:''}`);
+  const cur={hisseY:fEq, hisseT:trEq, altin:gold, doviz:fx, tl:0}, T=Object.values(cur).reduce((s,v)=>s+v,0)+invest;
+  const gaps={}; let gs=0; for(const [k] of PB){ gaps[k]=Math.max(0,target[k]/100*T-cur[k]); gs+=gaps[k]; }
+  const alloc={}; for(const [k] of PB) alloc[k]=gs>0?invest*gaps[k]/gs:invest*target[k]/100;
+  const cands=S.stocks.filter(x=>num(x.price)>0&&num(x.target)>0&&num(x.price)<=num(x.target)).map(x=>({x,k:stockCalc(x)})).sort((a,b)=>b.k.yld-a.k.yld).slice(0,5);
+  return {n,inc,exp,cv,cash,gold,fx,trEq,fEq,emM,emT,lumpy,goalMon,goalHeld,safety,excess,surplus,fill,lump,spread,monthly,invest,yrs,eq,target,cur,T,alloc,cands,why};
+}
+function vPlan(){
+  const P=planData(), m=ym(today()), saved=S.plans.find(x=>x.m===m);
+  let h=`<div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">🧭 Nakit Planı — ${mLabel(m)}</h2><button class="btn" onclick="showPlanPrompt()">🤖 Hisse seçimini Claude'a sor</button></div>
+    <p class="note">Program her ay gelir-gider geçmişinden, varlıklarından, yaklaşan ödemelerinden, hedeflerinden ve emekliliğe kalan süreden bir dağılım hesaplar. Hesaplama aracıdır; yatırım danışmanlığı değildir, karar senindir.</p>`;
+  if(P.n<2) return h+`<div class="warn">Hesap için en az 2 aylık gelir ve gider kaydı gerekiyor (şu an ${P.n} ay). Gelir/Gider sekmesine son aylarını gir.</div>`;
+  h+=`<div class="grid">${stat('Bu ay yatırılabilir',money(P.invest),P.invest>0?'pos':'')}
+    ${stat('Acil durum fonu',money(P.emT)+`<div class="note">${P.emM} aylık gider · eldeki TL ${money(P.cash)}</div>`)}
+    ${stat('Aylık ortalama artan',money(P.surplus),P.surplus>=0?'pos':'neg')}
+    ${stat('Uzun vade hisse oranı','%'+Math.round(P.eq)+`<div class="note">Emekliliğe ${P.yrs} yıl</div>`)}</div>`;
+  // Şelale
+  const W=[['Ortalama aylık gelir',P.inc],['Ortalama aylık gider',-P.exp]];
+  if(P.goalMon) W.push(['Yakın hedefler için birikim',-P.goalMon]);
+  if(P.fill) W.push(['Acil durum / ödeme rezervini tamamlama',-P.fill]);
+  if(P.lump) W.push([`Boştaki fazla nakit${P.spread>1?' (1/6)':''}`,P.lump]);
+  h+=`<div class="card"><h3>Para nereden geliyor, nereye gidiyor?</h3><table>${W.map(([l,v])=>`<tr><td>${l}</td><td class="num ${v<0?'neg':'pos'}">${v<0?'−':'+'}${money(Math.abs(v))}</td></tr>`).join('')}
+    <tr><td><b>Bu ay yatırılabilir</b></td><td class="num"><b>${money(P.invest)}</b></td></tr></table></div>`;
+  // Öneri
+  if(P.invest>0){
+    h+=`<div class="card"><h3>Bu ayın önerisi</h3><table><tr><th>Nereye</th><th class="num">Tutar</th><th>Hedef pay</th><th>Şu an</th></tr>`+
+      PB.map(([k,l,c])=>{ const now=P.T>0?P.cur[k]/P.T*100:0; return `<tr><td><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:${c};margin-right:6px"></span>${l}</td><td class="num"><b>${P.alloc[k]>=1?money(P.alloc[k]):'—'}</b></td><td>%${Math.round(P.target[k])}</td><td>%${Math.round(now)}</td></tr>`; }).join('')+`</table>`;
+    if(P.alloc.hisseY+P.alloc.hisseT>=1) h+= P.cands.length
+      ? `<p><b>İzleme listende hedef fiyatının altındaki hisseler</b> (temettü verimine göre):</p><ul>${P.cands.map(c=>`<li>${esc(c.x.symbol)}${c.x.name?' — '+esc(c.x.name):''}: ${money2(num(c.x.price),c.x.currency)} (hedef ${money2(num(c.x.target),c.x.currency)})${c.k.yld?`, verim %${nf2.format(c.k.yld)}`:''}</li>`).join('')}</ul>`
+      : `<p class="note">İzleme listende şu an hedef fiyatının altında hisse yok. Yukarıdaki butonla Claude'dan güncel aday iste, beğendiklerini Hisseler sekmesine hedef fiyatıyla ekle.</p>`;
+    h+= saved ? `<div class="ok">✅ Bu ayın planını ${fmtDate(saved.at)} tarihinde uyguladım olarak işaretledin. <button class="link" onclick="undoPlan()">geri al</button></div>`
+              : `<button class="btn" onclick="markPlan()">✅ Bu ayın planını uyguladım</button>`;
+    h+=`</div>`;
+  } else h+=`<div class="card"><p>Bu ay yatırıma ayrılacak para yok; öncelik güvenlik yastığını tamamlamak.</p></div>`;
+  h+=`<div class="card"><h3>Neden böyle?</h3><ul>${P.why.map(w=>`<li>${esc(w)}</li>`).join('')}</ul>
+    <p class="note">Emeklilik yaşın, hedeflerin ve varlıkların değiştikçe hesap kendiliğinden güncellenir. BES ve hayat sigortaları kilitli birikim olduğu için bu dağılıma katılmaz.</p></div>`;
+  if(S.plans.length) h+=`<div class="card"><h3>Geçmiş planlar</h3><table><tr><th>Ay</th><th class="num">Yatırılan</th><th>Dağılım</th><th>Not</th></tr>${[...S.plans].reverse().map(p=>`<tr><td>${mLabel(p.m)}</td><td class="num">${money(p.invest)}</td><td class="note">${PB.filter(([k])=>p.alloc[k]>=1).map(([k,l])=>l+' '+money(p.alloc[k])).join(' · ')}</td>
+    <td><input value="${esc(p.note||'')}" placeholder="ör. Claude'un önerisi, ne aldım" style="width:220px" onchange="setPlanNote('${p.m}',this.value)"></td></tr>`).join('')}</table></div>`;
+  return h;
+}
+function markPlan(){ const P=planData(), m=ym(today()); S.plans=S.plans.filter(x=>x.m!==m); S.plans.push({m, at:today(), invest:Math.round(P.invest), alloc:Object.fromEntries(PB.map(([k])=>[k,Math.round(P.alloc[k])])), note:''}); save(); render(); }
+function undoPlan(){ const m=ym(today()); S.plans=S.plans.filter(x=>x.m!==m); save(); render(); }
+function setPlanNote(m,v){ const p=S.plans.find(x=>x.m===m); if(p){ p.note=v; save(); } }
+function planPrompt(){
+  const P=planData(), L=[];
+  L.push(`Merhaba Claude. Aile finans programımın ${mLabel(ym(today()))} nakit planı aşağıda. Program varlık sınıfı dağılımını hesapladı; senden bu dağılımı uygulamak için somut araç ve hisse önerileri istiyorum. Lütfen güncel fiyat ve haberlere bakarak cevap ver.`,'');
+  L.push(`Durum: emekliliğe ${P.yrs} yıl, aylık ortalama gelir ${money(P.inc)}, gider ${money(P.exp)}, acil durum fonu hedefi ${money(P.emT)}.`);
+  L.push(`Mevcut uzun vadeli varlıklar: yabancı hisse ${money(P.fEq)}, Türk hisse/fon ${money(P.trEq)}, altın ${money(P.gold)}, döviz ${money(P.fx)}.`);
+  L.push('', `Bu ay yatırılacak toplam ${money(P.invest)}:`); PB.forEach(([k,l])=>{ if(P.alloc[k]>=1) L.push(`- ${l}: ${money(P.alloc[k])}`); });
+  const own=S.stocks.filter(x=>num(x.shares)>0).map(x=>x.symbol), watch=S.stocks.filter(x=>!(num(x.shares)>0)).map(x=>x.symbol);
+  L.push('', `Elimdeki hisseler: ${own.join(', ')||'yok'}. İzleme listem: ${watch.join(', ')||'yok'}.`);
+  L.push('', 'İstediklerim:',
+    '1. Yabancı hisse payı için: ABD, Avrupa ve İngiltere\'den adil değerinin altında işlem gören, temettüsü sürdürülebilir 3-5 hisse; her biri için kısa gerekçe, yaklaşık adil değer, temettü verimi ve riskler. Elimdekilerle aşırı yoğunlaşma yaratmasın.',
+    '2. Türk hisse/fon payı için 2-3 seçenek (hisse ya da düşük maliyetli fon/ETF).',
+    '3. Altın, döviz ve TL payı için en düşük maliyetli araç (fiziki, fon, ETF, mevduat, para piyasası fonu) hangisi?',
+    '4. Programın dağılımında gözden kaçan bir risk görüyorsan söyle.');
+  return L.join('\n');
+}
+function showPlanPrompt(){ showReport(); document.querySelector('#overlay h3').textContent='🤖 Nakit planı — Claude\'a sor'; document.getElementById('repTxt').value=planPrompt(); }
 
 // ---- Hedefler ----
 function vHedef(){
