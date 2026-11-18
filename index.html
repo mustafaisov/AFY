@@ -80,6 +80,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
   <button data-tab="bes" onclick="show('bes')">🏦 BES</button>
   <button data-tab="sigorta" onclick="show('sigorta')">🛡️ Hayat Sigortaları</button>
   <button data-tab="gsig" onclick="show('gsig')">🏥 Diğer Sigortalar</button>
+  <button data-tab="vergi" onclick="show('vergi')">🧾 Vergi & Aidat</button>
   <button data-tab="hedef" onclick="show('hedef')">🏁 Hedefler</button>
   <button data-tab="emekli" onclick="show('emekli')">🌴 Emeklilik</button>
   <button data-tab="ayar" onclick="show('ayar')">⚙️ Ayarlar & Yedek</button>
@@ -93,7 +94,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 'use strict';
 // ---------- Yardımcılar ----------
 const KEY = 'aileFinans_v1';
-const APP_VERSION = '1.9.1';
+const APP_VERSION = '1.10.0';
 const AYLAR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
 const CURS = [['TRY','TL'],['EUR','Euro'],['USD','Dolar']];
 const CURS_A = [...CURS, ['GAU','Gram altın']];
@@ -101,6 +102,16 @@ const ATYPES = ['Nakit/Banka','Döviz','Altın','Hisse/Fon','Gayrimenkul','Araç
 const NON_FIN = ['Gayrimenkul','Araç'];
 const DEBT_CAT = 'Kredi/Borç ödemesi', BES_CAT = 'BES katkısı', INS_CAT = 'Hayat sigortası primi', OINS_CAT = 'Sigorta (sağlık, DASK, konut)';
 const OINS_TYPES = ['Sağlık','DASK','Konut','Kasko','Trafik','Seyahat','Diğer'];
+const DUE_CAT = 'Vergi & aidat';
+// Vergi ve aidat türleri: ödeme takvimi kanundan bellidir (emlak: Mayıs/Kasım sonu, MTV: Ocak/Temmuz sonu)
+const DUE_KINDS = {
+  'Emlak vergisi':            {sched:'emlak',   unit:'yıllık', hint:'Belediyenin borç sorgulama ekranında yazan YILLIK tutar. 2 eşit taksit: Mayıs sonu ve Kasım sonu.'},
+  'Motorlu Taşıtlar Vergisi': {sched:'mtv',     unit:'yıllık', hint:'GİB (Dijital Vergi Dairesi / e-Devlet) MTV ekranındaki YILLIK tutar. 2 eşit taksit: Ocak sonu ve Temmuz sonu.'},
+  'Aidat':                    {sched:'monthly', unit:'aylık',  hint:'Site/apartman yönetiminin AYLIK aidatı ve ödeme günü.'},
+  'Çevre temizlik vergisi':   {sched:'emlak',   unit:'yıllık', hint:'İş yerlerinde emlak vergisiyle birlikte, aynı tarihlerde 2 taksit. Konutta genelde su faturasıyla alınır.'},
+  'Diğer aylık':              {sched:'monthly', unit:'aylık',  hint:'Her ay aynı gün ödenen sabit gider.'},
+  'Diğer yıllık':             {sched:'yearly',  unit:'yıllık', hint:'Yılda bir kez, aynı tarihte ödenen gider.'}
+};
 function normKey(x){ return String(x||'').toLocaleLowerCase('tr').replace(/\s+/g,''); }
 const FREQS = [[1,'Aylık'],[3,'3 ayda bir'],[6,'6 ayda bir'],[12,'Yıllık']];
 const nf = new Intl.NumberFormat('tr-TR',{maximumFractionDigits:0});
@@ -138,7 +149,7 @@ function defaults(){
       incomeCats:['Maaş','Ticari gelir','Kira geliri','Temettü','Faiz','Diğer'],
       rates:{EUR:0,USD:0,GAU:0,GBP:0}, avKey:'', ratesDate:'', ratesSourceDate:'', autoRates:true, lastBackup:''
     },
-    transactions:[], budgets:{}, assets:[], goals:[], bes:[], policies:[], stocks:[], insurances:[],
+    transactions:[], budgets:{}, assets:[], goals:[], bes:[], policies:[], stocks:[], insurances:[], dues:[],
     retirement:{age:48,retireAge:58,lifeTo:90,monthlyNeed:5000,current:0,monthly:0,realReturn:3.5,wr:3.5,lump:0}
   };
 }
@@ -318,7 +329,7 @@ async function reEncryptDocs(encrypt){
     else if(!encrypt && r.enc) await idbPut(k,{name:r.name,type:r.type,enc:false,data:await crypto.subtle.decrypt({name:'AES-GCM',iv:r.iv},DK,r.data)});
   }
 }
-function docOwner(kind,id){ const list={pol:S.policies, ins:S.insurances, bes:S.bes}[kind]; return list && list.find(x=>x.id===id); }
+function docOwner(kind,id){ const list={pol:S.policies, ins:S.insurances, bes:S.bes, due:S.dues}[kind]; return list && list.find(x=>x.id===id); }
 function docsHtml(kind,o){
   const ds=o.docs||[];
   return `<div class="row" style="margin-top:8px;gap:6px;align-items:center">${ds.map(d=>`<span style="background:var(--accent2);border-radius:6px;padding:4px 8px;font-size:13px;display:inline-flex;max-width:100%;align-items:center"><a href="#" onclick="openDoc('${d.id}');return false" title="${esc(d.name)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📄 ${esc(d.name)}</a><button class="link del" title="Belgeyi sil" onclick="delDoc('${kind}','${o.id}','${d.id}')">✕</button></span>`).join('')}
@@ -342,7 +353,7 @@ async function delDoc(kind,id,did){
 async function delDocsOf(o){ for(const d of (o&&o.docs)||[]) { try { await idbDel(d.id); } catch(e){} } }
 async function collectDocs(){
   const out={};
-  for(const o of [...S.policies,...S.insurances,...S.bes]) for(const d of o.docs||[]){
+  for(const o of [...S.policies,...S.insurances,...S.bes,...S.dues]) for(const d of o.docs||[]){
     try { const x=await loadDocBytes(d.id); out[d.id]={name:x.name,type:x.type,b64:b64e(x.bytes)}; } catch(e){}
   }
   return out;
@@ -555,6 +566,13 @@ function processRecurring(){
     const L=i.installments||[];
     L.forEach((x,k)=>{ if(!x.posted && x.date<=t){ addAuto(x.date,OINS_CAT,x.amount,i.currency||'TRY',`${i.type}: ${i.name} — taksit ${k+1}/${L.length}`,i.id); x.posted=true; n++; } });
   }
+  for(const d of S.dues){
+    const from=d.postedUntil||'0000-00-00';
+    for(const o of dueOccurrences(d, ym(from)<'2000-01'?ym(t):ym(from), ym(t))){
+      if(o.date>from && o.date<=t){ addAuto(o.date,DUE_CAT,o.amount,'TRY',`${d.kind}: ${d.name}${o.part?' ('+o.part+')':''}${o.est?' — tahmini tutar':''}`,d.id); n++; }
+    }
+    d.postedUntil=t;
+  }
   if(n){ save(); autoMsg='🔁 '+n+' otomatik ödeme gider olarak eklendi'; }
   return n;
 }
@@ -574,6 +592,7 @@ function autoLimit(c){
   if(c===BES_CAT) return S.bes.reduce((s,b)=>s+num(b.monthly),0);
   if(c===INS_CAT) return fixedPayments().filter(x=>x.kind==='Sigorta').reduce((s,x)=>s+x.amount,0);
   if(c===OINS_CAT) return fixedPayments().filter(x=>x.kind==='GSigorta').reduce((s,x)=>s+x.amount,0);
+  if(c===DUE_CAT) return fixedPayments().filter(x=>x.kind==='Vergi').reduce((s,x)=>s+x.amount,0);
   return 0;
 }
 function effLimit(c){ return S.budgets[c]>0 ? S.budgets[c] : autoLimit(c); }
@@ -591,6 +610,8 @@ function fixedPayments(){
   }
   for(const i of S.insurances){ const L=i.installments||[];
     L.forEach((x,k)=>{ if(ym(x.date)===cur) out.push({name:i.name, kind:'GSigorta', day:+x.date.slice(8), amount:toTRY(x.amount,i.currency||'TRY'), done:!!x.posted, label:`${i.type} · taksit ${k+1}/${L.length}`}); }); }
+  for(const d of S.dues) for(const o of dueOccurrences(d,cur,cur))
+    out.push({name:d.name, kind:'Vergi', day:+o.date.slice(8), amount:o.amount, done:o.date<=(d.postedUntil||''), label:d.kind+(o.part?' · '+o.part:'')+(o.est?' · tahmini':'')});
   return out.sort((x,y)=>num(x.day)-num(y.day));
 }
 
@@ -598,9 +619,9 @@ function cats(type){ return [...(type==='gelir'?S.settings.incomeCats:S.settings
 
 // ---------- Görünüm ----------
 let swReg=null, installEvt=null;
-let tab='ozet', filterMonth=ym(today()), editId=null, editAsset=null, editBes=null, editPol=null, editStock=null, editIns=null, renewFrom=null;
-const VIEWS = {ozet:vOzet, islem:vIslem, butce:vButce, varlik:vVarlik, hisse:vHisse, bes:vBes, sigorta:vSigorta, gsig:vGsig, hedef:vHedef, emekli:vEmekli, ayar:vAyar};
-function show(t){ tab=t; editId=null; editAsset=null; editBes=null; editPol=null; editStock=null; editIns=null; renewFrom=null; render(); window.scrollTo(0,0); }
+let tab='ozet', filterMonth=ym(today()), editId=null, editAsset=null, editBes=null, editPol=null, editStock=null, editIns=null, renewFrom=null, editDue=null;
+const VIEWS = {ozet:vOzet, islem:vIslem, butce:vButce, varlik:vVarlik, hisse:vHisse, bes:vBes, sigorta:vSigorta, gsig:vGsig, vergi:vVergi, hedef:vHedef, emekli:vEmekli, ayar:vAyar};
+function show(t){ tab=t; editId=null; editAsset=null; editBes=null; editPol=null; editStock=null; editIns=null; renewFrom=null; editDue=null; render(); window.scrollTo(0,0); }
 function render(){
   if(!S) return;
   const lb=document.getElementById('lockBtn'); if(lb) lb.style.display=LOCK?'':'none';
@@ -676,13 +697,14 @@ function upcomingPayments(nDays){
   S.assets.forEach(a=>{ if(isInstDebt(a) && num(a.left)>0) add(a.name+' taksiti',a.lastPosted,1,a.day,toTRY(a.inst,a.currency)); });
   S.bes.forEach(b=>{ if(num(b.monthly)>0) add(b.name+' BES katkısı',b.lastPosted,1,b.day,num(b.monthly)); });
   S.policies.forEach(p=>{ if(num(p.premium)>0) add(p.name+' sigorta primi',p.lastPosted,num(p.freq)||1,p.day,toTRY(p.premium,p.currency),p.end); });
+  S.dues.forEach(d=>dueOccurrences(d,ym(t),addMonths(ym(t),1)).forEach(o=>{ const k=daysBetween(t,o.date); if(k>=0 && k<=nDays && o.date>(d.postedUntil||'')) out.push({name:`${d.kind} (${d.name})${o.est?' – tahmini':''}`,date:o.date,days:k,amount:o.amount}); }));
   S.insurances.forEach(i=>(i.installments||[]).forEach((x,k)=>{ if(x.posted) return; const d=daysBetween(t,x.date); if(d>=0 && d<=nDays) out.push({name:`${i.type} sigortası (${i.name}) taksit ${k+1}`,date:x.date,days:d,amount:toTRY(x.amount,i.currency||'TRY')}); }));
   return out.sort((x,y)=>x.days-y.days);
 }
 function computeAlerts(){
   const out=[], t=today(), m=ym(t), tt=monthTotals(m), day=+t.slice(8), dim=new Date(+t.slice(0,4),+t.slice(5,7),0).getDate(), frac=day/dim;
   const avg={}; lastMonths(4).slice(0,3).forEach(pm=>{ const x=monthTotals(pm).byCat; for(const k in x) avg[k]=(avg[k]||0)+x[k]/3; });
-  const fixedCats=[DEBT_CAT,BES_CAT,INS_CAT,OINS_CAT];
+  const fixedCats=[DEBT_CAT,BES_CAT,INS_CAT,OINS_CAT,DUE_CAT];
   for(const c of S.settings.expenseCats){
     const lim=effLimit(c), sp=tt.byCat[c]||0, r=lim>0?sp/lim:0;
     if(lim>0 && !fixedCats.includes(c)){
@@ -705,6 +727,9 @@ function computeAlerts(){
     if(k>=0 && k<=30) out.push({lv:'amber',tx:`${i.type} sigortası "${i.name}" ${fmtDate(i.end)} tarihinde bitiyor (${k} gün). Yenilemeyi unutma.`});
     else if(k<0 && k>=-60) out.push({lv:'red',tx:`${i.type} sigortası "${i.name}" ${fmtDate(i.end)} tarihinde bitti; yenilenmediyse teminatın yok.`});
   }
+  for(const d of S.dues){ if(!['emlak','mtv'].includes((DUE_KINDS[d.kind]||{}).sched)) continue;
+    for(const o of dueOccurrences(d,ym(t),addMonths(ym(t),1))){ const k=daysBetween(t,o.date);
+      if(k>7 && k<=20) out.push({lv:'amber',tx:`${d.kind} (${d.name}) ${o.part||''} son ödeme günü ${fmtDate(o.date)} (${k} gün): ${money(o.amount)}${o.est?' (tahmini)':''}. Gecikirse gecikme zammı işler.`}); } }
   for(const x of upcomingPayments(7)) out.push({lv:'info',tx:`${x.days===0?'Bugün':x.days===1?'Yarın':x.days+' gün sonra'} (${fmtDate(x.date)}): ${x.name} ${money(x.amount)}`});
   const ord={red:0,amber:1,green:2,info:3};
   return out.sort((a,b)=>ord[a.lv]-ord[b.lv]);
@@ -738,6 +763,7 @@ function buildReport(){
   if(S.bes.length){ L.push('', '## BES'); S.bes.forEach(b=>{ const v=besVest(b); L.push(`- ${b.name}: kendi ${money(besOwn(b))}, devlet ${money(besState(b))}${(b.funds||[]).length?' (fonlar: '+b.funds.map(f=>`${f.code} ${f.acct==='state'?'devlet':'kendi'} ${money(fundVal(f))}`).join(', ')+')':''}, aylık katkı ${money(num(b.monthly))}, sistemde ${nf2.format(v.yrs)} yıl, hak ediş %${v.pct}`); }); }
   if(S.policies.length){ L.push('', '## Birikimli hayat sigortaları'); S.policies.forEach(p=>L.push(`- ${p.name} (${p.company||'-'}, sigortalı ${p.insured}): birikim ${money(num(p.value),p.currency)}, teminat ${money(num(p.coverage),p.currency)}, prim ${money(num(p.premium),p.currency)} / ${FREQS.find(f=>f[0]===(num(p.freq)||1))[1].toLowerCase()}, başlangıç ${fmtDate(p.start)}, vade ${p.end?fmtDate(p.end):'-'}`)); }
   if(S.insurances.length){ L.push('', '## Diğer sigortalar (sağlık, DASK, konut...)'); S.insurances.forEach(i=>L.push(`- ${i.type} – ${i.name} (${i.company||'-'}): ${fmtDate(i.start)} – ${fmtDate(i.end)}, toplam prim ${money(num(i.total),i.currency||'TRY')}, ${(i.installments||[]).length} taksit`)); }
+  if(S.dues.length){ L.push('', '## Vergi ve aidatlar'); S.dues.forEach(d=>L.push(`- ${d.kind} – ${d.name}${d.asset?' ('+d.asset+')':''}: ${Object.entries(d.amounts||{}).map(([y,a])=>y+': '+money(a)).join(', ')} (${DUE_KINDS[d.kind]?DUE_KINDS[d.kind].unit:''})`)); }
   if(S.goals.length){ L.push('', '## Hedefler'); S.goals.forEach(g=>L.push(`- ${g.name}: ${money(g.saved,g.currency)} / ${money(g.target,g.currency)}${g.date?', hedef tarih '+fmtDate(g.date):''}`)); }
   const R=S.retirement, rn=retNumbers();
   L.push('', '## Emeklilik planı (bugünkü euro ile, reel getiri)', `Yaş ${R.age}, emeklilik yaşı ${R.retireAge}, plan yaşı ${R.lifeTo}; emeklilikte aylık ihtiyaç ${money(R.monthlyNeed,'EUR')}; tek seferlik harcama ${money(R.lump,'EUR')}`,
@@ -816,12 +842,15 @@ function vButce(){
   const m=ym(today()), t=monthTotals(m), prev=lastMonths(4).slice(0,3), avg={};
   prev.forEach(pm=>{ const x=monthTotals(pm).byCat; for(const k in x) avg[k]=(avg[k]||0)+x[k]/3; });
   let h=`<h2>Bütçe</h2>`;
+  const fc=fixedForecast(), fct=fc.reduce((s,r)=>s+FC_SERIES.reduce((a,[k])=>a+r[k],0),0);
+  if(fct>0) h+=`<div class="card"><h3>📅 Önümüzdeki 12 ayın sabit giderleri</h3>${fixedForecastChart(fc)}
+    <p class="note">Toplam ${money(fct)} · aylık ortalama ${money(fct/12)}. Kredi taksitleri, BES, sigortalar, vergi ve aidatlar dahil; "tahmini" tutarlar son bilinen tutar ve artış oranıyla hesaplanır. Döviz ödemeleri bugünkü kurla.</p></div>`;
   const fp=fixedPayments();
   if(fp.length){
     const tot=fp.reduce((s,x)=>s+x.amount,0);
     h+=`<div class="card"><h3>🔁 Bu ayın sabit ödemeleri</h3>
-      <p class="note">Borç taksitleri, BES katkıları ve sigorta primleri, ödeme günü gelince otomatik olarak gider kaydedilir. Bunları ayrıca girmene gerek yok.</p>
-      <div class="scroll"><table>`+fp.map(x=>`<tr><td>${esc(x.name)}</td><td class="note">${x.kind==='GSigorta'?esc(x.label):x.kind==='Taksit'?'Taksit · kalan '+nf.format(x.left):x.kind==='BES'?'BES katkısı':'Hayat sigortası primi'+(x.cur&&x.cur!=='TRY'?' · '+money(x.orig,x.cur):'')}</td><td>Ayın ${num(x.day)||1}'i</td>
+      <p class="note">Borç taksitleri, BES katkıları, sigorta primleri, vergi ve aidatlar, ödeme günü gelince otomatik olarak gider kaydedilir. Bunları ayrıca girmene gerek yok.</p>
+      <div class="scroll"><table>`+fp.map(x=>`<tr><td>${esc(x.name)}</td><td class="note">${x.kind==='GSigorta'||x.kind==='Vergi'?esc(x.label):x.kind==='Taksit'?'Taksit · kalan '+nf.format(x.left):x.kind==='BES'?'BES katkısı':'Hayat sigortası primi'+(x.cur&&x.cur!=='TRY'?' · '+money(x.orig,x.cur):'')}</td><td>Ayın ${num(x.day)||1}'i</td>
         <td class="num">${money(x.amount)}</td><td>${x.done?'<span class="pos">✔ Gider eklendi</span>':'<span class="note">⏳ Bekliyor</span>'}</td></tr>`).join('')+
       `<tr class="total"><td colspan="3">Toplam</td><td class="num">${money(tot)}</td><td></td></tr></table></div></div>`;
   }
@@ -1379,6 +1408,100 @@ function setPol(id,v){ const p=S.policies.find(x=>x.id===id); if(p){ p.value=num
 function editPolFn(id){ editPol=id; render(); window.scrollTo(0,0); }
 function delPol(id){ if(!confirm('Bu poliçe silinsin mi? (Geçmiş prim giderleri silinmez; ekli belgeler silinir.)')) return; delDocsOf(S.policies.find(p=>p.id===id)); S.policies=S.policies.filter(p=>p.id!==id); save(); render(); }
 
+// ---- Vergi & aidat
+function lastDay(y,m){ return new Date(y,m,0).getDate(); }
+function dueAmount(d,y){   // o yılın tutarı: girilmişse o, değilse son bilinen yıldan tahmini artışla
+  const A=d.amounts||{}; if(A[y]!=null && A[y]!=='') return {amt:num(A[y]), est:false};
+  const ys=Object.keys(A).map(Number).filter(k=>k<y && A[k]!=null && A[k]!=='').sort((a,b)=>b-a);
+  if(!ys.length){ const up=Object.keys(A).map(Number).filter(k=>k>y).sort(); return up.length?{amt:num(A[up[0]]),est:true}:{amt:0,est:true}; }
+  return {amt:num(A[ys[0]])*Math.pow(1+num(d.inc)/100, y-ys[0]), est:true};
+}
+function dueOccurrences(d,fromM,toM){
+  const k=DUE_KINDS[d.kind]||DUE_KINDS['Diğer yıllık'], out=[];
+  for(let m=fromM; m<=toM; m=addMonths(m,1)){
+    const y=+m.slice(0,4), mo=+m.slice(5), {amt,est}=dueAmount(d,y);
+    if(d.startMonth && m<d.startMonth) continue;
+    if(d.endMonth && m>d.endMonth) continue;
+    if(k.sched==='emlak' && (mo===5||mo===11)) out.push({date:m+'-'+pad2(lastDay(y,mo)), amount:amt/2, est, part:mo===5?'1. taksit':'2. taksit'});
+    else if(k.sched==='mtv' && (mo===1||mo===7)) out.push({date:m+'-'+pad2(lastDay(y,mo)), amount:amt/2, est, part:mo===1?'1. taksit':'2. taksit'});
+    else if(k.sched==='monthly') out.push({date:dueDate(m,d.day||1), amount:amt, est});
+    else if(k.sched==='yearly' && mo===num(String(d.date||'').slice(5,7))) out.push({date:dueDate(m,+String(d.date).slice(8)||1), amount:amt, est});
+  }
+  return out;
+}
+function vVergi(){
+  const e=editDue?S.dues.find(x=>x.id===editDue):null, y=new Date().getFullYear(), kind=e?e.kind:'Emlak vergisi';
+  const assetNames=S.assets.filter(a=>['Gayrimenkul','Araç'].includes(a.type)).map(a=>a.name);
+  let h=`<h2>🧾 Vergi & Aidat</h2>
+  <div class="card"><h3>Nasıl çalışır?</h3>
+    <p class="note" style="margin:0">Ödeme <b>tarihleri kanundan bellidir</b>, program kendisi kurar: emlak vergisi Mayıs ve Kasım sonu, MTV Ocak ve Temmuz sonu, aidat her ay. <b>Tutarları</b> e-Devlet / belediye / GİB ekranlarından program okuyamaz (oraya giriş şifren gerekir). Yılda bir kez tutarı gir, ya da ekranın görüntüsünü ya da PDF'ini Claude'a gönder, dosyayı o hazırlasın. Yeni yılın tutarı açıklanana kadar program son tutarı "tahmini artış" oranıyla büyütüp tahmin eder (tahminler <i>tahmini</i> diye işaretlenir). Ödemeler son gün otomatik gider yazılır; 20 gün kala uyarı çıkar.</p>
+    ${importInsBtn()}</div>
+  <div class="card"><h3>${e?'Kaydı düzenle':'Vergi / aidat ekle'}</h3>
+    <form class="row" onsubmit="addDue(event)">
+      <label>Tür<select name="kind" onchange="document.getElementById('dueHint').textContent=DUE_KINDS[this.value].hint; const m=DUE_KINDS[this.value].sched; this.form.day.parentNode.style.display=m==='monthly'?'':'none'; this.form.date.parentNode.style.display=m==='yearly'?'':'none'; document.getElementById('dueUnit').textContent=DUE_KINDS[this.value].unit">${opts(Object.keys(DUE_KINDS),kind)}</select></label>
+      <label>Ad<input name="name" required value="${esc(e?e.name:'')}" placeholder="ör. Çorlu daire, 34 ABC 123" style="width:170px"></label>
+      <label>Bağlı varlık<input name="asset" list="assetList" value="${esc(e?e.asset||'':'')}" placeholder="isteğe bağlı" style="width:150px"><datalist id="assetList">${assetNames.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></label>
+      <label>${y} tutarı (<span id="dueUnit">${DUE_KINDS[kind].unit}</span>, TL)<input type="number" name="amount" step="any" min="0" required value="${e&&e.amounts&&e.amounts[y]!=null?e.amounts[y]:''}" style="width:140px"></label>
+      <label style="${DUE_KINDS[kind].sched==='monthly'?'':'display:none'}">Ödeme günü<input type="number" name="day" min="1" max="31" step="1" value="${e?e.day||1:1}" style="width:80px"></label>
+      <label style="${DUE_KINDS[kind].sched==='yearly'?'':'display:none'}">Ödeme tarihi<input type="date" name="date" value="${e?e.date||'':''}"></label>
+      <label>Tahmini yıllık artış %<input type="number" name="inc" step="any" min="0" value="${e?e.inc:27.83}" style="width:90px"></label>
+      <button class="btn">${e?'Kaydet':'Ekle'}</button>
+      ${e?'<button type="button" class="btn sec" onclick="editDue=null;render()">Vazgeç</button>':''}
+    </form>
+    <p class="note" id="dueHint">${esc(DUE_KINDS[kind].hint)}</p>
+    <p class="note">Varsayılan artış %27,83: 2027 için açıklanan yeniden değerleme oranı. MTV'de Cumhurbaşkanı farklı oran belirleyebilir (2026'da %18,95 uygulanmıştı); emlak vergisi ve aidat artışı farklı olabilir. Kesin tutar açıklanınca kartın içinden o yılın tutarını gir.</p></div>`;
+  if(!S.dues.length) return h+`<p class="note">Henüz kayıt yok.</p>`;
+  const cur=ym(today()), end=addMonths(cur,11);
+  const all=S.dues.flatMap(d=>dueOccurrences(d,cur,end));
+  const tot=all.reduce((s,o)=>s+o.amount,0), thisM=all.filter(o=>ym(o.date)===cur).reduce((s,o)=>s+o.amount,0);
+  h+=`<div class="grid">${stat('Bu ay',money(thisM))}${stat('Önümüzdeki 12 ay',money(tot)+`<div class="note">Aylık ortalama ${money(tot/12)}</div>`)}${stat('Kayıt',S.dues.length+' adet')}</div>`;
+  h+=S.dues.slice().sort((a,b)=>Object.keys(DUE_KINDS).indexOf(a.kind)-Object.keys(DUE_KINDS).indexOf(b.kind)).map(d=>{
+    const occ=dueOccurrences(d,cur,end), years=[y,y+1];
+    return `<div class="card" style="margin-top:16px"><div class="row" style="justify-content:space-between;align-items:center">
+      <h3 style="margin:0"><span style="background:#f3eefb;color:#4b2e83;border-radius:6px;padding:2px 8px;font-size:13px;margin-right:6px">${esc(d.kind)}</span>${esc(d.name)}${d.asset?` <span class="note">· ${esc(d.asset)}</span>`:''}</h3>
+      <div><button class="link" onclick="editDue='${d.id}';render();window.scrollTo(0,0)">düzenle</button><button class="link del" onclick="delDue('${d.id}')">sil</button></div></div>
+      <div class="row" style="margin:10px 0">${years.map(yy=>{ const a=dueAmount(d,yy); return `<label>${yy} ${DUE_KINDS[d.kind]?DUE_KINDS[d.kind].unit:''} tutarı${a.est?' <span style="color:var(--amber)">(tahmini)</span>':''}<input type="number" step="any" min="0" value="${d.amounts&&d.amounts[yy]!=null?d.amounts[yy]:''}" placeholder="${nf.format(Math.round(a.amt))} (tahmin)" style="width:150px" onchange="setDueAmount('${d.id}',${yy},this.value)"></label>`; }).join('')}
+      <span class="note">Artış tahmini %${nf2.format(num(d.inc))}</span></div>
+      <div class="scroll"><table><tr><th>Ödeme</th><th>Son gün</th><th class="num">Tutar</th><th>Durum</th></tr>${occ.map(o=>`<tr><td>${esc(o.part||mLabel(ym(o.date)))}</td><td>${fmtDate(o.date)}</td><td class="num">${money(o.amount)}${o.est?' <span class="note">tahmini</span>':''}</td><td>${o.date<=(d.postedUntil||'')?'<span class="pos">✔ Gider yazıldı</span>':'<span class="note">⏳ Bekliyor</span>'}</td></tr>`).join('')}</table></div>
+      ${docsHtml('due',d)}</div>`;
+  }).join('');
+  return h;
+}
+function addDue(ev){
+  ev.preventDefault(); const f=ev.target, old=editDue?S.dues.find(x=>x.id===editDue):null, y=new Date().getFullYear();
+  if(DUE_KINDS[f.kind.value].sched==='yearly' && !f.date.value){ alert('Yıllık ödeme tarihini gir.'); return; }
+  const d={...(old||{}), id:old?old.id:uid(), kind:f.kind.value, name:f.name.value.trim(), asset:f.asset.value.trim(), day:Math.min(31,Math.max(1,Math.round(num(f.day.value))||1)),
+           date:f.date.value, inc:num(f.inc.value), amounts:{...((old&&old.amounts)||{}), [y]:num(f.amount.value)}, docs:old?old.docs||[]:[]};
+  if(!old) d.postedUntil=addMonths(ym(today()),-1)+'-31';   // bu ayın geçmiş ödemeleri de gider yazılsın
+  if(old) S.dues[S.dues.indexOf(old)]=d; else S.dues.push(d);
+  ensureCat(DUE_CAT); editDue=null; processRecurring(); save(); render();
+}
+function setDueAmount(id,y,v){ const d=S.dues.find(x=>x.id===id); if(!d) return; d.amounts=d.amounts||{}; if(v==='') delete d.amounts[y]; else d.amounts[y]=num(v); save(); render(); }
+function delDue(id){ if(!confirm('Bu kayıt silinsin mi? (Geçmiş giderler silinmez; ekli belgeler silinir.)')) return; delDocsOf(S.dues.find(x=>x.id===id)); S.dues=S.dues.filter(x=>x.id!==id); save(); render(); }
+
+// ---- 12 aylık sabit gider projeksiyonu (kredi, BES, sigortalar, vergi & aidat)
+function fixedForecast(){
+  const cur=ym(today()), ms=[]; for(let k=0,m=cur;k<12;k++,m=addMonths(m,1)) ms.push(m);
+  const row={}; ms.forEach(m=>row[m]={m,debt:0,bes:0,life:0,oth:0,due:0});
+  for(const a of S.assets){ if(!isInstDebt(a)) continue;
+    let m=a.lastPosted===cur?cur:a.lastPosted?nextMonth(a.lastPosted):cur, left=num(a.left)+(a.lastPosted===cur?1:0);
+    while(left>0 && row[m]){ row[m].debt+=toTRY(a.inst,a.currency); left--; m=nextMonth(m); } }
+  for(const b of S.bes) if(num(b.monthly)>0) ms.forEach(m=>row[m].bes+=num(b.monthly));
+  insForecast().forEach(r=>{ if(row[r.m]){ row[r.m].life+=r.life; row[r.m].oth+=r.oth; } });
+  for(const d of S.dues) for(const o of dueOccurrences(d,cur,ms[11])) row[ym(o.date)].due+=o.amount;
+  return ms.map(m=>row[m]);
+}
+const FC_SERIES=[['debt','Kredi taksitleri','#8a4fbf'],['bes','BES','#c27c0e'],['life','Hayat sigortaları','#1f8a70'],['oth','Diğer sigortalar','#2f6db5'],['due','Vergi & aidat','#b5472f']];
+function fixedForecastChart(rows){
+  const tot=r=>FC_SERIES.reduce((s,[k])=>s+r[k],0), max=Math.max(1,...rows.map(tot)), W=600, H=170, bw=W/rows.length;
+  let svg=`<svg viewBox="0 -16 ${W} ${H+52}" width="100%" role="img" aria-label="12 aylık sabit giderler">`;
+  rows.forEach((r,i)=>{ const x=i*bw; let yb=H;
+    FC_SERIES.forEach(([k,lab,col])=>{ const hh=r[k]/max*H; if(hh>0){ yb-=hh; svg+=`<rect x="${(x+bw*0.16).toFixed(1)}" y="${yb.toFixed(1)}" width="${(bw*0.68).toFixed(1)}" height="${hh.toFixed(1)}" fill="${col}"><title>${mLabel(r.m)} ${lab}: ${money(r[k])}</title></rect>`; } });
+    const t=tot(r); if(t>0) svg+=`<text x="${(x+bw/2).toFixed(1)}" y="${(yb-4).toFixed(1)}" text-anchor="middle" font-size="10" fill="#1d2433">${t>=1e4?nf.format(t/1e3)+' B':nf.format(t)}</text>`;
+    svg+=`<text x="${(x+bw/2).toFixed(1)}" y="${H+18}" text-anchor="middle" font-size="11" fill="#6b7385">${mLabel(r.m)}</text>`; });
+  return svg+`</svg><div class="note">${FC_SERIES.map(([k,lab,col])=>`<span style="color:${col}">■</span> ${lab}`).join(' &nbsp; ')}</div>`;
+}
+
 // ---- Diğer (gider) sigortalar: sağlık, DASK, konut, kasko...
 function makeInstallments(total,count,first){
   const n=Math.max(1,Math.round(num(count))||1), each=Math.round(num(total)/n*100)/100, out=[];
@@ -1389,7 +1512,7 @@ function makeInstallments(total,count,first){
 function markHistory(i){ const cm=ym(today()); (i.installments||[]).forEach(x=>{ if(ym(x.date)<cm && !x.posted){ x.posted=true; x.hist=true; } }); }
 function addYears(d,k){ if(!d) return ''; const [y,m,dd]=d.split('-'); return (+y+k)+'-'+m+'-'+(m==='02'&&dd==='29'?'28':dd); }
 function importInsBtn(){
-  return `<div class="row" style="margin-top:8px"><label class="btn sec" style="flex-direction:row;cursor:pointer;color:var(--accent);font-size:15px;background:var(--accent2);padding:8px 14px;border-radius:7px">📄 Claude'un hazırladığı sigorta dosyasını içe aktar<input type="file" accept=".json,application/json" style="display:none" onchange="importIns(this)"></label></div>`;
+  return `<div class="row" style="margin-top:8px"><label class="btn sec" style="flex-direction:row;cursor:pointer;color:var(--accent);font-size:15px;background:var(--accent2);padding:8px 14px;border-radius:7px">📄 Claude'un hazırladığı dosyayı içe aktar<input type="file" accept=".json,application/json" style="display:none" onchange="importIns(this)"></label></div>`;
 }
 function insForecast(){
   const ms=[]; let m=ym(today()); for(let k=0;k<12;k++){ ms.push(m); m=addMonths(m,1); }
@@ -1480,9 +1603,9 @@ function delIns(id){ if(!confirm('Bu poliçe silinsin mi? (Geçmiş taksit gider
 async function importIns(inp){
   const file=inp.files[0]; inp.value=''; if(!file) return;
   let d; try { d=JSON.parse(await file.text()); } catch(e){ alert('Dosya okunamadı.'); return; }
-  if(!d || d.type!=='aile-finans-sigorta'){ alert('Bu dosya bir Aile Finans sigorta dosyası değil.'); return; }
-  const life=d.life||[], other=d.other||[], ndocs=[...life,...other].reduce((s,c)=>s+(c.docs||[]).length,0);
-  const lines=[...life.map(c=>`• Hayat: ${c.name}`), ...other.map(c=>`• ${c.type}: ${c.name} (${fmtDate(c.start)} – ${fmtDate(c.end)})`)];
+  if(!d || d.type!=='aile-finans-sigorta'){ alert('Bu dosya bir Aile Finans dosyası değil.'); return; }
+  const life=d.life||[], other=d.other||[], dues=d.dues||[], ndocs=[...life,...other,...dues].reduce((s,c)=>s+(c.docs||[]).length,0);
+  const lines=[...life.map(c=>`• Hayat: ${c.name}`), ...other.map(c=>`• ${c.type}: ${c.name} (${fmtDate(c.start)} – ${fmtDate(c.end)})`), ...dues.map(c=>`• ${c.kind}: ${c.name}`)];
   if(!confirm(`Şu poliçeler içe aktarılacak (${ndocs} PDF ile):\n\n${lines.join('\n')}\n\nAynı poliçe programda varsa bilgileri güncellenir. Devam?`)) return;
   const addDocs=async(o,docs)=>{ o.docs=o.docs||[]; for(const x of docs||[]){ if(o.docs.some(y=>y.name===x.name)) continue; const id=await storeDoc(x.name,x.type||'application/pdf',b64d(x.b64).buffer); o.docs.push({id,name:x.name,size:Math.round(x.b64.length*0.75),added:today()}); } };
   let added=0, updated=0;
@@ -1504,9 +1627,16 @@ async function importIns(inp){
       else { i={id:uid(), ...fields, installments:L, docs:[]}; S.insurances.push(i); added++; }
       markHistory(i); ensureCat(OINS_CAT); await addDocs(i,c.docs);
     }
+    for(const c of dues){
+      let x=S.dues.find(o=>o.kind===c.kind && normKey(o.name)===normKey(c.name));
+      const fields={kind:DUE_KINDS[c.kind]?c.kind:'Diğer yıllık', name:c.name, asset:c.asset||'', day:num(c.day)||1, date:c.date||'', inc:c.inc!=null?num(c.inc):27.83};
+      if(x){ Object.assign(x,fields); x.amounts={...(x.amounts||{}), ...(c.amounts||{})}; updated++; }
+      else { x={id:uid(), ...fields, amounts:{...(c.amounts||{})}, postedUntil:c.postedUntil||addMonths(ym(today()),-1)+'-31', docs:[]}; S.dues.push(x); added++; }
+      ensureCat(DUE_CAT); await addDocs(x,c.docs);
+    }
   } catch(e){ alert('İçe aktarma sırasında hata: '+e.message); }
   processRecurring(); save(); render();
-  alert(`✅ Sigortalar aktarıldı: ${added} yeni, ${updated} güncellenen poliçe.`);
+  alert(`✅ Aktarıldı: ${added} yeni, ${updated} güncellenen kayıt.`);
 }
 
 // ---- Hedefler ----
