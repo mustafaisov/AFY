@@ -29,7 +29,7 @@ def main():
     old = json.loads(OUT.read_text(encoding="utf-8")) if OUT.exists() else {}
     funds = dict(old.get("funds", {}))
     today = dt.date.today()
-    start = (today - dt.timedelta(days=14)).isoformat()
+    start = (today - dt.timedelta(days=75)).isoformat()   # belge tarihindeki fiyat için ~2,5 ay geçmiş
     crawler = Crawler()
     errors = []
     for code in codes:
@@ -42,9 +42,10 @@ def main():
             df = df.sort_values("date")
             row = df.iloc[-1]
             price = to_float(row["price"])
+            hist = {str(d)[:10]: to_float(p) for d, p in zip(df["date"], df["price"]) if to_float(p) > 0}
             if price > 0:
                 funds[code] = {"price": price, "date": str(row["date"])[:10],
-                               "title": str(row.get("title", "") or "")}
+                               "title": str(row.get("title", "") or ""), "hist": hist}
             else:
                 errors.append(f"{code}: fiyat 0")
         except Exception as e:  # tek bir fon hatası diğerlerini durdurmasın

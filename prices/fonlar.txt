@@ -1,2 +1,4 @@
 # Günlük fiyatı TEFAS'tan çekilecek BES fon kodları (her satıra bir kod).
 # Claude, BES PDF'lerindeki fon kodlarını buraya ekler.
+VEL
+VEI
