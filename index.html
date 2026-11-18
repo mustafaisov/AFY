@@ -93,7 +93,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 'use strict';
 // ---------- Yardımcılar ----------
 const KEY = 'aileFinans_v1';
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.9.1';
 const AYLAR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
 const CURS = [['TRY','TL'],['EUR','Euro'],['USD','Dolar']];
 const CURS_A = [...CURS, ['GAU','Gram altın']];
@@ -321,7 +321,7 @@ async function reEncryptDocs(encrypt){
 function docOwner(kind,id){ const list={pol:S.policies, ins:S.insurances, bes:S.bes}[kind]; return list && list.find(x=>x.id===id); }
 function docsHtml(kind,o){
   const ds=o.docs||[];
-  return `<div class="row" style="margin-top:8px;gap:6px;align-items:center">${ds.map(d=>`<span style="background:var(--accent2);border-radius:6px;padding:4px 8px;font-size:13px;white-space:nowrap"><a href="#" onclick="openDoc('${d.id}');return false">📄 ${esc(d.name)}</a><button class="link del" title="Belgeyi sil" onclick="delDoc('${kind}','${o.id}','${d.id}')">✕</button></span>`).join('')}
+  return `<div class="row" style="margin-top:8px;gap:6px;align-items:center">${ds.map(d=>`<span style="background:var(--accent2);border-radius:6px;padding:4px 8px;font-size:13px;display:inline-flex;max-width:100%;align-items:center"><a href="#" onclick="openDoc('${d.id}');return false" title="${esc(d.name)}" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📄 ${esc(d.name)}</a><button class="link del" title="Belgeyi sil" onclick="delDoc('${kind}','${o.id}','${d.id}')">✕</button></span>`).join('')}
     <label style="cursor:pointer;flex-direction:row;font-size:13px;color:var(--accent);padding:4px 6px">📎 PDF ekle<input type="file" accept="application/pdf,image/*" multiple style="display:none" onchange="attachDocs(this,'${kind}','${o.id}')"></label></div>`;
 }
 async function attachDocs(inp,kind,id){
@@ -1348,6 +1348,7 @@ function vSigorta(){
     const next=ended?'':fmtDate(dueDate(addMonths(p.lastPosted||ym(today()),f),p.day));
     return `<div class="card"><h3>${esc(p.name)}</h3>
       <p class="note">${esc(p.company||'')}${p.company?' · ':''}${p.policyNo?'Poliçe '+esc(p.policyNo)+' · ':''}Sigortalı: ${esc(p.insured)}</p>
+      ${p.note?`<p class="note" style="background:#f6f7f9;border-radius:6px;padding:6px 8px">ℹ️ ${esc(p.note)}</p>`:''}
       <table>
         <tr><td>Güncel birikim</td><td class="num"><b>${money(num(p.value),cur)}</b>${cur!=='TRY'&&rate(cur)?`<div class="note">${money(toTRY(p.value,cur))}</div>`:''}</td></tr>
         <tr><td>Vefat teminatı</td><td class="num">${money(num(p.coverage),cur)}</td></tr>
@@ -1489,7 +1490,7 @@ async function importIns(inp){
     for(const c of life){
       let p=S.policies.find(x=>(c.policyNo && x.policyNo && normKey(x.policyNo)===normKey(c.policyNo)) || normKey(x.name)===normKey(c.name));
       const fields={name:c.name, company:c.company||'', policyNo:c.policyNo||'', insured:c.insured||'', currency:c.currency||'TRY', premium:num(c.premium), freq:num(c.freq)||1,
-        day:num(c.day)||1, start:c.start||'', end:c.end||'', value:num(c.value), coverage:num(c.coverage), expected:num(c.expected)};
+        day:num(c.day)||1, start:c.start||'', end:c.end||'', value:num(c.value), coverage:num(c.coverage), expected:num(c.expected), note:c.note||''};
       if(p){ Object.assign(p,fields); updated++; } else { p={id:uid(), ...fields, lastPosted:'', docs:[]}; S.policies.push(p); added++; }
       if(c.lastPosted) p.lastPosted=c.lastPosted; else if(!p.lastPosted && p.premium>0) initPolicy(p,false);
       ensureCat(INS_CAT); await addDocs(p,c.docs);
