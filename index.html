@@ -92,7 +92,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 'use strict';
 // ---------- Yardımcılar ----------
 const KEY = 'aileFinans_v1';
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.8.1';
 const AYLAR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
 const CURS = [['TRY','TL'],['EUR','Euro'],['USD','Dolar']];
 const CURS_A = [...CURS, ['GAU','Gram altın']];
@@ -1081,10 +1081,11 @@ function fundsTable(b){
   h+=`<form class="row" onsubmit="addFund(event,'${b.id}')" style="margin-top:8px">
     <label>Hesap<select name="acct"><option value="own">Kendi birikimim</option><option value="state">Devlet katkısı</option></select></label>
     <label>Fon kodu<input name="code" required placeholder="ör. AH5" style="width:85px"></label>
-    <label>Pay adedi<input type="number" name="units" step="any" min="0" required style="width:115px"></label>
+    <label>Pay adedi<input type="number" name="units" step="any" min="0" style="width:115px"></label>
+    <label>ya da bugünkü tutar (TL)<input type="number" name="amount" step="any" min="0" style="width:130px"></label>
     <label>Dağılım %<input type="number" name="alloc" step="any" min="0" max="100" placeholder="yeni katkı" style="width:90px"></label>
     <button class="btn sec">Fon ekle</button></form>
-    <p class="note">Fon kodları ve pay adetleri BES şirketinin uygulamasında ya da hesap özeti PDF'inde yazar. Fiyatlar her gün TEFAS'tan otomatik gelir; gelmezse elle girebilirsin. "Dağılım %": yeni aylık katkının hangi fona ne oranda yatırıldığı; her ay katkı yapılınca o fonlardan otomatik pay alınır.</p>`;
+    <p class="note">Fon kodları ve pay adetleri BES şirketinin uygulamasında ya da hesap özeti PDF'inde yazar. Pay adedini bilmiyorsan fonun bugünkü tutarını yaz; program fiyat gelince pay adedini kendisi hesaplar. Fiyatlar her gün TEFAS'tan otomatik gelir; gelmezse elle girebilirsin. "Dağılım %": yeni aylık katkının hangi fona ne oranda yatırıldığı; her ay katkı yapılınca o fonlardan otomatik pay alınır.</p>`;
   return h;
 }
 function vBes(){
@@ -1149,7 +1150,11 @@ function addFund(ev,bid){
   b.funds=b.funds||[];
   if(b.funds.some(x=>x.code===code && x.acct===acct)){ alert(code+' bu hesapta zaten var; pay adedini tablodan düzeltebilirsin.'); return; }
   if(!besFunds(b,acct).length){ b[acct]=0; b[acct+'Cash']=0; }   // artık tutar fonlardan hesaplanacak
-  b.funds.push({acct, code, name:'', units:num(f.units.value), price:0, priceDate:'', alloc:num(f.alloc.value)});
+  const units=num(f.units.value), amount=num(f.amount.value);
+  if(!(units>0) && !(amount>0)){ alert('Pay adedini ya da fonun bugünkü tutarını gir.'); return; }
+  const nf={acct, code, name:'', units, price:0, priceDate:'', alloc:num(f.alloc.value)};
+  if(!(units>0)){ nf.pendingAmount=amount; nf.pendingDate=today(); }   // fiyat gelince pay adedine çevrilir
+  b.funds.push(nf);
   save(); render(); fetchFundPrices(false);
 }
 function setFund(bid,i,k,v){
