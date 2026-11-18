@@ -92,7 +92,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 'use strict';
 // ---------- Yardımcılar ----------
 const KEY = 'aileFinans_v1';
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 const AYLAR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
 const CURS = [['TRY','TL'],['EUR','Euro'],['USD','Dolar']];
 const CURS_A = [...CURS, ['GAU','Gram altın']];
@@ -355,6 +355,7 @@ function updateStatus(){
   if(fileError) s+='<br><span style="color:#ffb4a8">'+esc(fileError)+'</span>';
   if(ratesMsg) s+='<br>'+esc(ratesMsg);
   if(autoMsg) s+='<br>'+esc(autoMsg);
+  if(typeof fundMsg!=='undefined' && fundMsg) s+='<br>'+esc(fundMsg);
   el.innerHTML=s;
   const rm=document.getElementById('ratesMsg'); if(rm) rm.textContent=ratesMsg;
 }
@@ -368,7 +369,7 @@ let ratesBusy=false, ratesMsg='';
 function formDirty(){
   return [...document.querySelectorAll('main form input, main form select, main form textarea')].some(el=>
     el.type==='checkbox' ? el.checked!==el.defaultChecked :
-    el.tagName==='SELECT' ? [...el.options].some(o=>o.selected!==o.defaultSelected) : el.value!==el.defaultValue);
+    el.tagName==='SELECT' ? el.selectedIndex!==Math.max(0,[...el.options].findIndex(o=>o.defaultSelected)) : el.value!==el.defaultValue);
 }
 async function getJSON(u){
   const c=new AbortController(), t=setTimeout(()=>c.abort(),10000);
@@ -467,7 +468,7 @@ function processRecurring(){
     while(m<=cur && guard++<240){
       const d=dueDate(m,b.day); if(d>t) break;
       addAuto(d,BES_CAT,b.monthly,'TRY',b.name+' BES katkısı',b.id);
-      b.own=num(b.own)+num(b.monthly); b.state=num(b.state)+num(b.monthly)*num(b.rate)/100;
+      besInvest(b, num(b.monthly), num(b.monthly)*num(b.rate)/100);
       b.lastPosted=m; n++; m=nextMonth(m);
     }
   }
@@ -649,7 +650,7 @@ function buildReport(){
   if(S.stocks.length){ L.push('', '## Hisse senetleri (hissenin para biriminde)');
     S.stocks.forEach(x=>{ const k=stockCalc(x); L.push(`- ${x.symbol}${x.name?' ('+x.name+')':''}: ${num(x.shares)>0?`${num(x.shares)} adet, maliyet ${money2(num(x.cost),x.currency)}, `:'İZLEME LİSTESİ, '}fiyat ${num(x.price)?money2(num(x.price),x.currency):'yok'}${num(x.shares)>0?`, K/Z %${nf2.format(k.gainPct)}, değer ${money(k.valTRY)}`:''}${num(x.div)?`, yıllık temettü ${money2(num(x.div),x.currency)}/hisse (verim %${nf2.format(k.yld)})`:''}${num(x.target)?`, hedef alım ${money2(num(x.target),x.currency)}`:''}${x.note?`, not: ${x.note}`:''}`); });
     L.push(`Toplam yıllık temettü (brüt): ${money(w.div)}`); }
-  if(S.bes.length){ L.push('', '## BES'); S.bes.forEach(b=>{ const v=besVest(b); L.push(`- ${b.name}: kendi ${money(num(b.own))}, devlet ${money(num(b.state))}, aylık katkı ${money(num(b.monthly))}, sistemde ${nf2.format(v.yrs)} yıl, hak ediş %${v.pct}`); }); }
+  if(S.bes.length){ L.push('', '## BES'); S.bes.forEach(b=>{ const v=besVest(b); L.push(`- ${b.name}: kendi ${money(besOwn(b))}, devlet ${money(besState(b))}${(b.funds||[]).length?' (fonlar: '+b.funds.map(f=>`${f.code} ${f.acct==='state'?'devlet':'kendi'} ${money(fundVal(f))}`).join(', ')+')':''}, aylık katkı ${money(num(b.monthly))}, sistemde ${nf2.format(v.yrs)} yıl, hak ediş %${v.pct}`); }); }
   if(S.policies.length){ L.push('', '## Birikimli hayat sigortaları'); S.policies.forEach(p=>L.push(`- ${p.name} (${p.company||'-'}, sigortalı ${p.insured}): birikim ${money(num(p.value),p.currency)}, teminat ${money(num(p.coverage),p.currency)}, prim ${money(num(p.premium),p.currency)} / ${FREQS.find(f=>f[0]===(num(p.freq)||1))[1].toLowerCase()}, başlangıç ${fmtDate(p.start)}, vade ${p.end?fmtDate(p.end):'-'}`)); }
   if(S.goals.length){ L.push('', '## Hedefler'); S.goals.forEach(g=>L.push(`- ${g.name}: ${money(g.saved,g.currency)} / ${money(g.target,g.currency)}${g.date?', hedef tarih '+fmtDate(g.date):''}`)); }
   const R=S.retirement, rn=retNumbers();
@@ -1007,14 +1008,78 @@ function besVest(b){
   const pct = yrs<3?0 : yrs<6?15 : yrs<10?35 : (age>=56?100:60);
   return {months,yrs,pct};
 }
-function besVested(b){ return num(b.own)+num(b.state)*besVest(b).pct/100; }
+// Fon bazlı BES: her fon için hesap (kendi/devlet), pay adedi, fiyat ve yeni katkı dağılımı tutulur.
+const BES_PRICE_URL='prices/emk.json';
+let fundMsg='';
+function besFunds(b,acct){ return (b.funds||[]).filter(f=>f.acct===acct); }
+function fundVal(f){ return num(f.units)*num(f.price); }
+function besOwn(b){ const fs=besFunds(b,'own'); return fs.length ? fs.reduce((s,f)=>s+fundVal(f),0)+num(b.ownCash) : num(b.own); }
+function besState(b){ const fs=besFunds(b,'state'); return fs.length ? fs.reduce((s,f)=>s+fundVal(f),0)+num(b.stateCash) : num(b.state); }
+function besVested(b){ return besOwn(b)+besState(b)*besVest(b).pct/100; }
+// Aylık katkıyla fon payı alınır (dağılım oranlarına göre); fon yoksa tutar doğrudan eklenir
+function besInvest(b,ownAmt,stateAmt){
+  for(const [acct,amt] of [['own',ownAmt],['state',stateAmt]]){
+    if(!(amt>0)) continue;
+    const all=besFunds(b,acct), fs=all.filter(f=>num(f.price)>0 && num(f.alloc)>0), tot=fs.reduce((s,f)=>s+num(f.alloc),0);
+    if(!all.length) b[acct]=num(b[acct])+amt;
+    else if(tot>0) fs.forEach(f=>{ f.units=num(f.units)+amt*num(f.alloc)/tot/num(f.price); });
+    else b[acct+'Cash']=num(b[acct+'Cash'])+amt;   // dağılım yoksa nakit olarak bekler
+  }
+}
+async function fetchFundPrices(manual){
+  const all=S.bes.flatMap(b=>b.funds||[]);
+  if(!all.length){ if(manual) alert('Önce bir sözleşmeye fon ekle.'); return; }
+  fundMsg='⏳ BES fon fiyatları alınıyor…'; updateStatus();
+  try {
+    const d=await getJSON(BES_PRICE_URL+'?t='+Date.now()), F=d.funds||{}; let ok=0; const miss=new Set();
+    for(const f of all){
+      const x=F[String(f.code).toUpperCase()];
+      if(x && num(x.price)>0){ if(!f.priceDate || x.date>=f.priceDate){ f.price=num(x.price); f.priceDate=x.date; if(!f.name && x.title) f.name=x.title; } ok++; }
+      else miss.add(f.code);
+    }
+    S.settings.fundsDate=today(); save();
+    const dates=all.map(f=>f.priceDate).filter(Boolean).sort();
+    fundMsg='🏦 BES fon fiyatları güncel'+(dates.length?' ('+fmtDate(dates[dates.length-1])+')':'')+(miss.size?' · fiyatı gelmeyen: '+[...miss].join(', '):'');
+  } catch(e){
+    fundMsg='⚠️ BES fon fiyatları alınamadı'+(location.protocol==='file:'?' (programı internet adresinden açmalısın)':'');
+    if(manual) alert(fundMsg+'. Fiyatları elle de girebilirsin.');
+  }
+  updateStatus(); if(manual || !formDirty()) render();
+}
+function fundsTable(b){
+  const fs=b.funds||[];
+  let h=`<h3 style="margin:14px 0 6px">Fonlar</h3>`;
+  if(fs.length){
+    const row=(f,i)=>`<tr><td><b>${esc(f.code)}</b><div class="note">${esc(f.name||'')}</div></td>
+      <td class="num"><input type="number" step="any" min="0" value="${num(f.units)}" style="width:115px" onchange="setFund('${b.id}',${i},'units',this.value)"></td>
+      <td class="num"><input type="number" step="any" min="0" value="${num(f.price)||''}" placeholder="fiyat" style="width:100px" onchange="setFund('${b.id}',${i},'price',this.value)"><div class="note">${f.priceDate?fmtDate(f.priceDate):'fiyat yok'}</div></td>
+      <td class="num"><b>${money(fundVal(f))}</b></td>
+      <td class="num"><input type="number" step="any" min="0" max="100" value="${num(f.alloc)||''}" placeholder="%" style="width:65px" onchange="setFund('${b.id}',${i},'alloc',this.value)"></td>
+      <td class="num"><button class="link del" onclick="delFund('${b.id}',${i})">sil</button></td></tr>`;
+    for(const [acct,title] of [['own','👤 Kendi birikimim'],['state','🏛️ Devlet katkısı']]){
+      const list=fs.map((f,i)=>[f,i]).filter(([f])=>f.acct===acct); if(!list.length) continue;
+      const tot=list.reduce((s,[f])=>s+fundVal(f),0)+num(b[acct+'Cash']), al=list.reduce((s,[f])=>s+num(f.alloc),0);
+      h+=`<div class="scroll"><table><tr><th>${title}</th><th class="num">Pay adedi</th><th class="num">Birim fiyat (TL)</th><th class="num">Tutar</th><th class="num">Dağılım %</th><th></th></tr>`+
+        list.map(([f,i])=>row(f,i)).join('')+
+        (num(b[acct+'Cash'])?`<tr><td colspan="3" class="note">Fona dağıtılmamış katkı (dağılım % girilmemiş)</td><td class="num">${money(num(b[acct+'Cash']))}</td><td></td><td></td></tr>`:'')+
+        `<tr class="total"><td colspan="3">Toplam</td><td class="num">${money(tot)}</td><td class="num ${al&&Math.abs(al-100)>0.5?'neg':''}">${al?'%'+nf2.format(al):''}</td><td></td></tr></table></div>`;
+    }
+  }
+  h+=`<form class="row" onsubmit="addFund(event,'${b.id}')" style="margin-top:8px">
+    <label>Hesap<select name="acct"><option value="own">Kendi birikimim</option><option value="state">Devlet katkısı</option></select></label>
+    <label>Fon kodu<input name="code" required placeholder="ör. AH5" style="width:85px"></label>
+    <label>Pay adedi<input type="number" name="units" step="any" min="0" required style="width:115px"></label>
+    <label>Dağılım %<input type="number" name="alloc" step="any" min="0" max="100" placeholder="yeni katkı" style="width:90px"></label>
+    <button class="btn sec">Fon ekle</button></form>
+    <p class="note">Fon kodları ve pay adetleri BES şirketinin uygulamasında ya da hesap özeti PDF'inde yazar. Fiyatlar her gün TEFAS'tan otomatik gelir; gelmezse elle girebilirsin. "Dağılım %": yeni aylık katkının hangi fona ne oranda yatırıldığı; her ay katkı yapılınca o fonlardan otomatik pay alınır.</p>`;
+  return h;
+}
 function vBes(){
   const e=editBes?S.bes.find(x=>x.id===editBes):null;
   let h=`<h2>🏦 Bireysel Emeklilik (BES)</h2><div class="card"><h3>${e?'Sözleşmeyi düzenle':'BES sözleşmesi ekle'}</h3>
     <form class="row" onsubmit="addBes(event)">
       <label>Şirket / sözleşme adı<input name="name" required value="${esc(e?e.name:'')}" placeholder="ör. Anadolu Hayat BES"></label>
-      <label>Kendi birikimin (TL)<input type="number" name="own" step="any" min="0" value="${e?e.own:''}" required style="width:140px"></label>
-      <label>Devlet katkısı hesabı (TL)<input type="number" name="state" step="any" min="0" value="${e?e.state:''}" style="width:140px"></label>
+      <label>Sözleşme no<input name="contractNo" value="${esc(e?e.contractNo||'':'')}" placeholder="isteğe bağlı" style="width:130px"></label>
       <label>Aylık katkı payı (TL)<input type="number" name="monthly" step="any" min="0" value="${e?e.monthly:''}" style="width:130px"></label>
       <label>Ödeme günü (ayın)<input type="number" name="day" step="1" min="1" max="31" value="${e?e.day:''}" placeholder="1-31" style="width:100px"></label>
       <label>Sisteme giriş tarihi<input type="date" name="start" required value="${e?e.start:''}"></label>
@@ -1022,23 +1087,27 @@ function vBes(){
       <button class="btn">${e?'Kaydet':'Ekle'}</button>
       ${e?'<button type="button" class="btn sec" onclick="editBes=null;render()">Vazgeç</button>':''}
     </form>
-    <p class="note">Tutarları BES şirketinin uygulamasından ya da e-Devlet'ten (Emeklilik Gözetim Merkezi) bakabilirsin. Aylık katkı, ödeme günü gelince otomatik gider yazılır; kendi birikimine ve devlet katkısına (oran kadar) eklenir. Fon getirisi otomatik hesaplanmaz: ara sıra güncel tutarları aşağıdan düzelt.</p></div>`;
+    <p class="note">Sözleşmeyi ekledikten sonra kartın içinden fonlarını (kendi birikimin ve devlet katkısı ayrı ayrı) ekle. Aylık katkı, ödeme günü gelince otomatik gider yazılır ve fonlardan pay alınır.</p>
+    <div class="row" style="margin-top:6px"><label class="btn sec" style="flex-direction:row;cursor:pointer;color:var(--accent);font-size:15px;background:var(--accent2);padding:8px 14px;border-radius:7px">📄 Claude'un hazırladığı BES dosyasını içe aktar<input type="file" accept=".json,application/json" style="display:none" onchange="importBes(this)"></label>
+    ${S.bes.some(b=>(b.funds||[]).length)?'<button class="btn" onclick="fetchFundPrices(true)">🌐 Fon fiyatlarını güncelle</button>':''}</div></div>`;
   if(!S.bes.length) return h+`<p class="note">Henüz BES sözleşmesi eklenmedi.</p>`+besInfo();
   let own=0, st=0, vest=0, mon=0;
-  S.bes.forEach(b=>{ own+=num(b.own); st+=num(b.state); vest+=besVested(b); mon+=num(b.monthly); });
+  S.bes.forEach(b=>{ own+=besOwn(b); st+=besState(b); vest+=besVested(b); mon+=num(b.monthly); });
   h+=`<div class="grid">${stat('Toplam BES birikimi',money(own+st)+`<div class="note">Kendi: ${money(own)} · Devlet: ${money(st)}</div>`)}${stat('Bugün çıksan alacağın (vergi öncesi)',money(vest),'pos')}${stat('Aylık toplam katkı',money(mon))}</div>`;
   const age=num(S.retirement.age), cy=new Date().getFullYear();
-  h+=`<div class="grid">`+S.bes.map(b=>{
+  h+=S.bes.map(b=>{
     const v=besVest(b), y=Math.floor(v.months/12), mo=v.months%12;
     const tenY=b.start?(+b.start.slice(0,4)+10):cy, retY=Math.max(tenY, cy+Math.max(0,Math.ceil(56-age)));
     const next = v.yrs<3?'3 yılda %15':v.yrs<6?'6 yılda %35':v.yrs<10?'10 yılda %60 (56 yaşla %100)':age<56?'56 yaşında %100':'';
-    return `<div class="card"><h3>${esc(b.name)}</h3>
-      <p>Toplam: <b>${money(num(b.own)+num(b.state))}</b><br><span class="note">Sistemde ${y} yıl ${mo} ay · devlet katkısı hak edişi <b>%${v.pct}</b>${next?' · sonraki kademe: '+next:''}</span></p>
-      <p class="note">Emeklilik şartı (10 yıl + 56 yaş) yaklaşık <b>${retY}</b> yılında dolar.${b.monthly?' Aylık katkı: '+money(num(b.monthly))+', ayın '+(num(b.day)||1)+"'i.":''}</p>
-      <div class="row"><label>Kendi birikimin<input type="number" step="any" min="0" value="${num(b.own)}" style="width:130px" onchange="setBes('${b.id}','own',this.value)"></label>
-      <label>Devlet katkısı<input type="number" step="any" min="0" value="${num(b.state)}" style="width:130px" onchange="setBes('${b.id}','state',this.value)"></label>
-      <button class="link" onclick="editBesFn('${b.id}')">düzenle</button><button class="link del" onclick="delBes('${b.id}')">sil</button></div></div>`;
-  }).join('')+`</div>`;
+    const hasOwnF=besFunds(b,'own').length, hasStF=besFunds(b,'state').length;
+    return `<div class="card" style="margin-top:16px"><div class="row" style="justify-content:space-between"><h3 style="margin:0">${esc(b.name)}${b.contractNo?` <span class="note">· ${esc(b.contractNo)}</span>`:''}</h3>
+      <div><button class="link" onclick="editBesFn('${b.id}')">düzenle</button><button class="link del" onclick="delBes('${b.id}')">sil</button></div></div>
+      <div class="grid" style="margin-top:10px">${stat('👤 Kendi birikimim',money(besOwn(b)))}${stat('🏛️ Devlet katkısı',money(besState(b))+`<div class="note">hak edilen %${v.pct}: ${money(besState(b)*v.pct/100)}</div>`)}${stat('Toplam',money(besOwn(b)+besState(b)),'pos')}</div>
+      <p class="note" style="margin-top:10px">Sistemde ${y} yıl ${mo} ay · devlet katkısı hak edişi <b>%${v.pct}</b>${next?' · sonraki kademe: '+next:''} · emeklilik şartı (10 yıl + 56 yaş) yaklaşık <b>${retY}</b>.${b.monthly?' Aylık katkı: '+money(num(b.monthly))+', ayın '+(num(b.day)||1)+"'i.":''}</p>
+      ${!hasOwnF||!hasStF?`<div class="row">${!hasOwnF?`<label>Kendi birikimin (fon eklemeden)<input type="number" step="any" min="0" value="${num(b.own)}" style="width:130px" onchange="setBes('${b.id}','own',this.value)"></label>`:''}
+      ${!hasStF?`<label>Devlet katkısı (fon eklemeden)<input type="number" step="any" min="0" value="${num(b.state)}" style="width:130px" onchange="setBes('${b.id}','state',this.value)"></label>`:''}</div>`:''}
+      ${fundsTable(b)}</div>`;
+  }).join('');
   return h+besInfo();
 }
 function besInfo(){
@@ -1051,8 +1120,9 @@ function besInfo(){
 }
 function addBes(ev){
   ev.preventDefault(); const f=ev.target, old=editBes?S.bes.find(x=>x.id===editBes):null;
-  const b={id:editBes||uid(), name:f.name.value.trim(), own:num(f.own.value), state:num(f.state.value), monthly:num(f.monthly.value),
-           day:Math.min(31,Math.max(1,Math.round(num(f.day.value))||1)), start:f.start.value, rate:num(f.rate.value), lastPosted:old&&old.lastPosted?old.lastPosted:''};
+  const b={...(old||{}), id:editBes||uid(), name:f.name.value.trim(), contractNo:f.contractNo.value.trim(), monthly:num(f.monthly.value),
+           day:Math.min(31,Math.max(1,Math.round(num(f.day.value))||1)), start:f.start.value, rate:num(f.rate.value),
+           own:old?num(old.own):0, state:old?num(old.state):0, funds:old&&old.funds?old.funds:[], lastPosted:old&&old.lastPosted?old.lastPosted:''};
   if(b.monthly>0 && !b.lastPosted) initRecurring(b, b.monthly, 'TRY', b.name+' BES katkısı', BES_CAT, 'Birikim tutarlarını');
   if(old){ S.bes[S.bes.indexOf(old)]=b; editBes=null; } else S.bes.push(b);
   processRecurring(); save(); render();
@@ -1060,6 +1130,50 @@ function addBes(ev){
 function setBes(id,k,v){ const b=S.bes.find(x=>x.id===id); if(b){ b[k]=num(v); save(); render(); } }
 function editBesFn(id){ editBes=id; render(); window.scrollTo(0,0); }
 function delBes(id){ if(!confirm('Bu BES sözleşmesi silinsin mi? (Geçmiş katkı giderleri silinmez.)')) return; S.bes=S.bes.filter(b=>b.id!==id); save(); render(); }
+function addFund(ev,bid){
+  ev.preventDefault(); const f=ev.target, b=S.bes.find(x=>x.id===bid); if(!b) return;
+  const code=f.code.value.trim().toUpperCase(), acct=f.acct.value;
+  b.funds=b.funds||[];
+  if(b.funds.some(x=>x.code===code && x.acct===acct)){ alert(code+' bu hesapta zaten var; pay adedini tablodan düzeltebilirsin.'); return; }
+  if(!besFunds(b,acct).length){ b[acct]=0; b[acct+'Cash']=0; }   // artık tutar fonlardan hesaplanacak
+  b.funds.push({acct, code, name:'', units:num(f.units.value), price:0, priceDate:'', alloc:num(f.alloc.value)});
+  save(); render(); fetchFundPrices(false);
+}
+function setFund(bid,i,k,v){
+  const b=S.bes.find(x=>x.id===bid); if(!b||!b.funds[i]) return; const f=b.funds[i];
+  f[k]=num(v); if(k==='price') f.priceDate=today();
+  if(k==='units') b[f.acct+'Cash']=0;   // pay adedi elle düzeltildiyse bekleyen katkı sıfırlanır
+  save(); render();
+}
+function delFund(bid,i){ const b=S.bes.find(x=>x.id===bid); if(!b||!confirm(b.funds[i].code+' fonu silinsin mi?')) return; b.funds.splice(i,1); save(); render(); }
+// Claude'un BES PDF'lerinden hazırladığı dosyayı içe aktarır
+async function importBes(inp){
+  const file=inp.files[0]; inp.value=''; if(!file) return;
+  let d; try { d=JSON.parse(await file.text()); } catch(e){ alert('Dosya okunamadı.'); return; }
+  if(!d || d.type!=='aile-finans-bes' || !Array.isArray(d.contracts)){ alert('Bu dosya bir Aile Finans BES dosyası değil.'); return; }
+  const lines=d.contracts.map(c=>`• ${c.name}${c.contractNo?' ('+c.contractNo+')':''}: ${(c.funds||[]).length} fon`);
+  if(!confirm('Şu BES bilgileri içe aktarılacak:\n\n'+lines.join('\n')+'\n\nAynı sözleşme programda varsa fonları ve pay adetleri dosyadakiyle değiştirilir. Devam?')) return;
+  let added=0, updated=0;
+  for(const c of d.contracts){
+    const norm=x=>String(x||'').toLocaleLowerCase('tr').trim();
+    let b=S.bes.find(x=>(c.contractNo && x.contractNo && norm(x.contractNo)===norm(c.contractNo)) || norm(x.name)===norm(c.name));
+    const funds=(c.funds||[]).map(f=>({acct:f.acct==='state'?'state':'own', code:String(f.code||'').toUpperCase(), name:f.name||'', units:num(f.units), price:num(f.price), priceDate:f.priceDate||'', alloc:num(f.alloc)}));
+    if(b){
+      ['name','contractNo','company','start','day','rate','monthly'].forEach(k=>{ if(c[k]!==undefined && c[k]!=='' && c[k]!==null) b[k]= ['day','rate','monthly'].includes(k)?num(c[k]):c[k]; });
+      if(funds.length){ b.funds=funds; b.ownCash=0; b.stateCash=0; if(besFunds(b,'own').length) b.own=0; if(besFunds(b,'state').length) b.state=0; }
+      if(num(b.monthly)>0 && !b.lastPosted) initRecurring(b, b.monthly, 'TRY', b.name+' BES katkısı', BES_CAT, 'Fon pay adetlerini');
+      updated++;
+    } else {
+      b={id:uid(), name:c.name||'BES', contractNo:c.contractNo||'', company:c.company||'', start:c.start||today(), day:num(c.day)||1, rate:c.rate!=null?num(c.rate):20,
+         monthly:num(c.monthly), own:num(c.own), state:num(c.state), funds, lastPosted:''};
+      if(b.monthly>0) initRecurring(b, b.monthly, 'TRY', b.name+' BES katkısı', BES_CAT, 'Fon pay adetlerini');
+      S.bes.push(b); added++;
+    }
+  }
+  processRecurring(); save(); render();
+  alert(`✅ BES bilgileri aktarıldı: ${added} yeni, ${updated} güncellenen sözleşme.`);
+  fetchFundPrices(false);
+}
 
 // ---- Hayat sigortaları ----
 function initPolicy(p,silent){
@@ -1351,6 +1465,7 @@ function boot(){
   if(booted) return; booted=true;
   if(S.settings.autoRates && S.settings.ratesDate!==today()) fetchRates(false);
   if(S.settings.avKey && S.stocks.some(x=>x.priceDate!==today())) setTimeout(()=>fetchPrices(false),1500);
+  if(S.bes.some(b=>(b.funds||[]).length) && S.settings.fundsDate!==today()) setTimeout(()=>fetchFundPrices(false),800);
 }
 if(encStored) showLock(); else boot();
 // ---------- Kurulum ve güncelleme (PWA) ----------
