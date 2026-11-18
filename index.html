@@ -95,7 +95,7 @@ ol{margin:6px 0 0;padding-left:20px;line-height:1.8}
 'use strict';
 // ---------- Yardımcılar ----------
 const KEY = 'aileFinans_v1';
-const APP_VERSION = '1.12.0';
+const APP_VERSION = '1.13.0';
 const AYLAR = ['Oca','Şub','Mar','Nis','May','Haz','Tem','Ağu','Eyl','Eki','Kas','Ara'];
 const CURS = [['TRY','TL'],['EUR','Euro'],['USD','Dolar']];
 const CURS_A = [...CURS, ['GAU','Gram altın']];
@@ -151,7 +151,7 @@ function defaults(){
       incomeCats:['Maaş','Ticari gelir','Kira geliri','Temettü','Faiz','Diğer'],
       rates:{EUR:0,USD:0,GAU:0,GBP:0}, avKey:'', dismissed:[], ratesDate:'', ratesSourceDate:'', autoRates:true, lastBackup:''
     },
-    transactions:[], budgets:{}, assets:[], goals:[], bes:[], policies:[], stocks:[], insurances:[], dues:[], plans:[],
+    transactions:[], budgets:{}, assets:[], goals:[], bes:[], policies:[], stocks:[], insurances:[], dues:[], plans:[], decisions:[],
     retirement:{age:48,retireAge:58,lifeTo:90,monthlyNeed:5000,current:0,monthly:0,realReturn:3.5,wr:3.5,lump:0}
   };
 }
@@ -841,6 +841,7 @@ function buildReport(){
     `Bugünkü birikim ${money(R.current,'EUR')}, aylık birikim ${money(R.monthly,'EUR')}, reel getiri %${nf2.format(R.realReturn)}, çekim oranı %${nf2.format(R.wr)}`,
     `Gereken sermaye (güvenli) ${money(rn.need,'EUR')}; emeklilikte tahmini birikim ${money(rn.fv,'EUR')}`);
   const al=computeAlerts(); if(al.length){ L.push('', '## Programın uyarıları'); al.forEach(a=>L.push('- '+a.tx)); }
+  const dl=S.decisions.filter(d=>!d.supersededBy).slice(-6); if(dl.length){ L.push('', '## Son yatırım kararlarım (öneri → benim kararım)'); dl.forEach(d=>L.push(`- ${mLabel(d.m)}: öneri ${money(d.proposal.invest)} → ${DSTAT[d.status].toLowerCase()}${d.status!=='hayir'?' '+money(d.total):''}${d.note?' ('+d.note+')':''}`)); }
   const ck=computeChecks(); if(ck.length){ L.push('', '## Eksik olabilecek ödemeler'); ck.forEach(c=>L.push('- '+c.tx)); }
   L.push('', '## Sorularım',
     '1. Harcamalarımda nerede tasarruf edebilirim? Somut önerilerin neler?',
@@ -1759,7 +1760,8 @@ function planData(){
   return {n,inc,exp,cv,cash,gold,fx,trEq,fEq,emM,emT,lumpy,goalMon,goalHeld,safety,excess,surplus,fill,lump,spread,monthly,invest,yrs,eq,target,cur,T,alloc,cands,why};
 }
 function vPlan(){
-  const P=planData(), m=ym(today()), saved=S.plans.find(x=>x.m===m);
+  if((S.plans||[]).length){ S.plans.forEach(p=>S.decisions.push({id:uid(), m:p.m, at:p.at+'T12:00:00', ver:'1.12.0', ack:false, status:'aynen', proposal:{invest:p.invest, alloc:p.alloc, target:{}, why:[]}, alloc:p.alloc, total:p.invest, note:(p.note?p.note+' — ':'')+'1.12.0 sürümünde "uyguladım" olarak işaretlendi', corrects:''})); S.plans=[]; save(); }
+  const P=planData(), m=ym(today());
   let h=`<div class="row" style="justify-content:space-between;align-items:center"><h2 style="margin:0">🧭 Nakit Planı — ${mLabel(m)}</h2><button class="btn" onclick="showPlanPrompt()">🤖 Hisse seçimini Claude'a sor</button></div>
     <p class="note">Program her ay gelir-gider geçmişinden, varlıklarından, yaklaşan ödemelerinden, hedeflerinden ve emekliliğe kalan süreden bir dağılım hesaplar. Hesaplama aracıdır; yatırım danışmanlığı değildir, karar senindir.</p>`;
   if(P.n<2) return h+`<div class="warn">Hesap için en az 2 aylık gelir ve gider kaydı gerekiyor (şu an ${P.n} ay). Gelir/Gider sekmesine son aylarını gir.</div>`;
@@ -1781,19 +1783,57 @@ function vPlan(){
     if(P.alloc.hisseY+P.alloc.hisseT>=1) h+= P.cands.length
       ? `<p><b>İzleme listende hedef fiyatının altındaki hisseler</b> (temettü verimine göre):</p><ul>${P.cands.map(c=>`<li>${esc(c.x.symbol)}${c.x.name?' — '+esc(c.x.name):''}: ${money2(num(c.x.price),c.x.currency)} (hedef ${money2(num(c.x.target),c.x.currency)})${c.k.yld?`, verim %${nf2.format(c.k.yld)}`:''}</li>`).join('')}</ul>`
       : `<p class="note">İzleme listende şu an hedef fiyatının altında hisse yok. Yukarıdaki butonla Claude'dan güncel aday iste, beğendiklerini Hisseler sekmesine hedef fiyatıyla ekle.</p>`;
-    h+= saved ? `<div class="ok">✅ Bu ayın planını ${fmtDate(saved.at)} tarihinde uyguladım olarak işaretledin. <button class="link" onclick="undoPlan()">geri al</button></div>`
-              : `<button class="btn" onclick="markPlan()">✅ Bu ayın planını uyguladım</button>`;
-    h+=`</div>`;
-  } else h+=`<div class="card"><p>Bu ay yatırıma ayrılacak para yok; öncelik güvenlik yastığını tamamlamak.</p></div>`;
+    h+=`</div>`+decisionForm(P);
+  } else h+=`<div class="card"><p>Bu ay yatırıma ayrılacak para yok; öncelik güvenlik yastığını tamamlamak.</p></div>`+decisionForm(P);
   h+=`<div class="card"><h3>Neden böyle?</h3><ul>${P.why.map(w=>`<li>${esc(w)}</li>`).join('')}</ul>
     <p class="note">Emeklilik yaşın, hedeflerin ve varlıkların değiştikçe hesap kendiliğinden güncellenir. BES ve hayat sigortaları kilitli birikim olduğu için bu dağılıma katılmaz.</p></div>`;
-  if(S.plans.length) h+=`<div class="card"><h3>Geçmiş planlar</h3><table><tr><th>Ay</th><th class="num">Yatırılan</th><th>Dağılım</th><th>Not</th></tr>${[...S.plans].reverse().map(p=>`<tr><td>${mLabel(p.m)}</td><td class="num">${money(p.invest)}</td><td class="note">${PB.filter(([k])=>p.alloc[k]>=1).map(([k,l])=>l+' '+money(p.alloc[k])).join(' · ')}</td>
-    <td><input value="${esc(p.note||'')}" placeholder="ör. Claude'un önerisi, ne aldım" style="width:220px" onchange="setPlanNote('${p.m}',this.value)"></td></tr>`).join('')}</table></div>`;
+  h+=decisionLog();
   return h;
 }
-function markPlan(){ const P=planData(), m=ym(today()); S.plans=S.plans.filter(x=>x.m!==m); S.plans.push({m, at:today(), invest:Math.round(P.invest), alloc:Object.fromEntries(PB.map(([k])=>[k,Math.round(P.alloc[k])])), note:''}); save(); render(); }
-function undoPlan(){ const m=ym(today()); S.plans=S.plans.filter(x=>x.m!==m); save(); render(); }
-function setPlanNote(m,v){ const p=S.plans.find(x=>x.m===m); if(p){ p.note=v; save(); } }
+// ---- Karar kaydı: öneri bağlayıcı değildir, kararı kullanıcı verir ve her karar silinemez şekilde kaydedilir ----
+const DSTAT={aynen:'Öneriyi aynen uyguladım', degisik:'Değiştirerek uyguladım', hayir:'Uygulamadım'};
+function fmtDT(iso){ const d=new Date(iso); return d.toLocaleDateString('tr-TR')+' '+d.toLocaleTimeString('tr-TR',{hour:'2-digit',minute:'2-digit'}); }
+function decisionForm(P){
+  const m=ym(today()), last=[...S.decisions].reverse().find(d=>d.m===m);
+  let h=`<div class="card" id="decCard"><h3>🖊️ Bu ayın kararı</h3>`;
+  if(last) h+=`<div class="ok" style="margin-bottom:10px">Bu ay için kararını ${fmtDT(last.at)} tarihinde kaydettin: <b>${DSTAT[last.status]}</b>${last.status!=='hayir'?` (toplam ${money(last.total)})`:''}. Fikrin değiştiyse aşağıdan yeni bir karar kaydedebilirsin; eski kayıt silinmez, "düzeltildi" olarak kalır.</div>`;
+  h+=`<form onsubmit="saveDecision(event)"><p class="note">Program sadece öneri sunar. Gerçekte ne yaptığını yaz; öneriden farklıysa tutarları değiştir.</p>
+    <div class="row">${Object.entries(DSTAT).map(([k,l],i)=>`<label style="flex-direction:row;align-items:center;gap:6px"><input type="radio" name="status" value="${k}" ${i===0?'checked':''} onchange="decToggle(this.form)"> ${l}</label>`).join('')}</div>
+    <div class="row" id="decAmts" style="margin-top:8px">${PB.map(([k,l])=>`<label style="width:170px">${l}<input type="number" name="a_${k}" min="0" step="any" value="${Math.round(P.alloc[k])}" oninput="this.form.status.value='degisik'"></label>`).join('')}</div>
+    <label style="margin-top:8px">Gerekçe / ne aldın? <input name="note" placeholder="ör. Öneriye uydum; yabancı hisse olarak X ve Y aldım" style="width:100%"></label>
+    <label style="flex-direction:row;align-items:center;gap:8px;margin-top:10px"><input type="checkbox" name="ack" required> Bu kararı kendim verdim; programın ve Claude'un önerileri bağlayıcı değildir.</label>
+    <button class="btn" style="margin-top:10px">Kararı kaydet</button></form></div>`;
+  return h;
+}
+function decToggle(f){ document.getElementById('decAmts').style.opacity=f.status.value==='hayir'?0.4:1; }
+function saveDecision(ev){
+  ev.preventDefault(); const f=ev.target, P=planData(), m=ym(today()), st=f.status.value;
+  const alloc=Object.fromEntries(PB.map(([k])=>[k, st==='hayir'?0:num(f['a_'+k].value)]));
+  const prop=Object.fromEntries(PB.map(([k])=>[k,Math.round(P.alloc[k])]));
+  const status = st==='aynen' && PB.some(([k])=>Math.abs(alloc[k]-prop[k])>1) ? 'degisik' : st;
+  const prev=[...S.decisions].reverse().find(d=>d.m===m && !d.supersededBy);
+  const rec={id:uid(), m, at:new Date().toISOString(), ver:APP_VERSION, ack:true, status,
+    proposal:{invest:Math.round(P.invest), alloc:prop, target:Object.fromEntries(PB.map(([k])=>[k,Math.round(P.target[k])])), why:P.why},
+    alloc, total:Object.values(alloc).reduce((s,v)=>s+v,0), note:f.note.value.trim(), corrects:prev?prev.id:''};
+  if(prev) prev.supersededBy=rec.id;
+  S.decisions.push(rec); save(); render();
+}
+function decisionLog(){
+  if(!S.decisions.length) return '';
+  const rows=[...S.decisions].reverse().map(d=>`<tr style="${d.supersededBy?'opacity:.55':''}"><td>${fmtDT(d.at)}</td><td>${mLabel(d.m)}</td>
+    <td class="num">${money(d.proposal.invest)}</td><td>${DSTAT[d.status]}${d.supersededBy?' <span class="note">(düzeltildi)</span>':''}</td><td class="num">${d.status==='hayir'?'—':money(d.total)}</td>
+    <td class="note">${PB.filter(([k])=>d.alloc[k]>=1).map(([k,l])=>l+' '+money(d.alloc[k])).join(' · ')}${d.note?'<br>'+esc(d.note):''}</td></tr>`).join('');
+  return `<div class="card"><div class="row" style="justify-content:space-between"><h3 style="margin:0">📜 Karar kaydı</h3><button class="btn sec" onclick="exportDecisions()">CSV indir</button></div>
+    <p class="note">Her kayıtta o ayki öneri, senin kararın, tarih-saat ve "kararı ben verdim" onayı saklanır. Kayıtlar silinemez; yeni karar eskisini sadece "düzeltildi" olarak işaretler. Yedeklere de dahildir.</p>
+    <table><tr><th>Tarih</th><th>Ay</th><th class="num">Öneri</th><th>Karar</th><th class="num">Uygulanan</th><th>Dağılım / gerekçe</th></tr>${rows}</table></div>`;
+}
+function exportDecisions(){
+  const q=v=>'"'+String(v??'').replace(/"/g,'""')+'"';
+  const head=['Kayıt zamanı','Ay','Program sürümü','Önerilen toplam',...PB.map(([,l])=>'Öneri: '+l),'Karar',...PB.map(([,l])=>'Uygulanan: '+l),'Uygulanan toplam','Gerekçe','Kullanıcı onayı','Düzelttiği kayıt','Durum'];
+  const rows=S.decisions.map(d=>[d.at,d.m,d.ver,d.proposal.invest,...PB.map(([k])=>d.proposal.alloc[k]),DSTAT[d.status],...PB.map(([k])=>d.alloc[k]),d.total,d.note,d.ack?'Evet':'',d.corrects,d.supersededBy?'Düzeltildi':'Geçerli']);
+  const csv='\ufeff'+[head,...rows].map(r=>r.map(q).join(';')).join('\r\n');
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'})); a.download='karar-kaydi-'+today()+'.csv'; a.click();
+}
 function planPrompt(){
   const P=planData(), L=[];
   L.push(`Merhaba Claude. Aile finans programımın ${mLabel(ym(today()))} nakit planı aşağıda. Program varlık sınıfı dağılımını hesapladı; senden bu dağılımı uygulamak için somut araç ve hisse önerileri istiyorum. Lütfen güncel fiyat ve haberlere bakarak cevap ver.`,'');
